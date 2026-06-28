@@ -1,0 +1,30 @@
+# Caddy reverse proxy with automatic HTTPS (Let's Encrypt).
+# Easiest option: TLS certs are obtained and renewed for you.
+#
+#   1. Point your domain's A/AAAA record at this host.
+#   2. Replace quotes.example.com below with that domain.
+#   3. Run stockpricer bound to loopback (BIND_ADDR=127.0.0.1, the default)
+#      with TRUST_PROXY=1 so per-client rate limiting sees real client IPs.
+#   4. caddy run --config ./Caddyfile   (or use a system Caddy service)
+
+quotes.example.com {
+    encode gzip
+
+    # Small GET API: reject oversized requests outright.
+    request_body {
+        max_size 16KB
+    }
+
+    reverse_proxy 127.0.0.1:8849 {
+        header_up X-Real-IP {remote_host}
+        # upstream is fast; don't hold connections open for slow clients
+        transport http {
+            dial_timeout 5s
+            read_timeout 25s
+        }
+    }
+}
+
+# Caddy redirects HTTP->HTTPS automatically. Request-rate limiting is handled
+# in the app (RATE_LIMIT_RPM); if you want it at the edge too, add the
+# github.com/mholt/caddy-ratelimit plugin.

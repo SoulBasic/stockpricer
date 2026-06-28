@@ -50,6 +50,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from datetime import datetime, timezone, timedelta
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
@@ -63,10 +64,35 @@ QUOTE_TIMEOUT     = float(os.environ.get("QUOTE_TIMEOUT", "8"))      # overall b
 US_PREFER_GRACE   = float(os.environ.get("US_PREFER_GRACE", "2.5"))  # extra wait for the richer US source: pre/post/overnight (seconds)
 RESOLVE_CACHE_TTL = int(os.environ.get("RESOLVE_CACHE_TTL", "600"))  # fuzzy-search / resolve cache TTL (seconds)
 
+# Hardening knobs (matter when the port is reachable from untrusted networks).
+RESOLVE_CACHE_MAX  = int(os.environ.get("RESOLVE_CACHE_MAX", "1024"))     # max cached resolutions; LRU eviction bounds memory
+MAX_RESPONSE_BYTES = int(os.environ.get("MAX_RESPONSE_BYTES", "5000000")) # cap per upstream response (anti-OOM / gzip bomb)
+SOCKET_TIMEOUT     = float(os.environ.get("SOCKET_TIMEOUT", "20"))        # client socket read timeout (anti-slowloris), seconds
+RATE_LIMIT_RPM     = float(os.environ.get("RATE_LIMIT_RPM", "120"))       # per-client req/min for /quote & /search (0 disables)
+TRUST_PROXY        = os.environ.get("TRUST_PROXY", "0").lower() in ("1", "true", "yes")  # honor X-Real-IP / X-Forwarded-For
+
 
 # --------------------------------------------------------------------------- #
 #  Low level HTTP helper                                                      #
 # --------------------------------------------------------------------------- #
+def _inflate_capped(data, limit=None):
+    """zlib-inflate `data` (raw or zlib-wrapped), refusing to expand past
+    `limit` bytes so a decompression bomb can't exhaust memory."""
+    limit = MAX_RESPONSE_BYTES if limit is None else limit
+    last = None
+    for wbits in (zlib.MAX_WBITS, -zlib.MAX_WBITS):
+        try:
+            d = zlib.decompressobj(wbits)
+            out = d.decompress(data, limit + 1)
+            if len(out) > limit or d.unconsumed_tail:
+                raise RuntimeError("upstream response too large after inflate")
+            return out + d.flush()
+        except zlib.error as e:
+            last = e
+            continue
+    raise last if last else zlib.error("inflate failed")
+
+
 def http_get(url, headers=None, timeout=DEFAULT_TIMEOUT, opener=None, encoding=None):
     """GET a URL, transparently handling gzip. Returns decoded text."""
     h = {
@@ -80,16 +106,21 @@ def http_get(url, headers=None, timeout=DEFAULT_TIMEOUT, opener=None, encoding=N
     req = urllib.request.Request(url, headers=h)
     fn = opener.open if opener else urllib.request.urlopen
     with fn(req, timeout=timeout) as resp:
-        data = resp.read()
+        # Cap the read so a huge (or hostile) upstream/proxy body can't blow up
+        # memory.  We only ever expect small JSON / one-line payloads.
+        data = resp.read(MAX_RESPONSE_BYTES + 1)
+        if len(data) > MAX_RESPONSE_BYTES:
+            raise RuntimeError("upstream response too large (> %d bytes)" % MAX_RESPONSE_BYTES)
         enc = (resp.headers.get("Content-Encoding") or "").lower()
         if enc == "gzip":
-            data = gzip.GzipFile(fileobj=io.BytesIO(data)).read()
+            # read() with a limit caps the *decompressed* size -> gzip-bomb safe
+            data = gzip.GzipFile(fileobj=io.BytesIO(data)).read(MAX_RESPONSE_BYTES + 1)
+            if len(data) > MAX_RESPONSE_BYTES:
+                raise RuntimeError("upstream response too large after gunzip")
         elif enc == "deflate":
-            # we advertise deflate, so decode it too (raw or zlib-wrapped)
-            try:
-                data = zlib.decompress(data)
-            except zlib.error:
-                data = zlib.decompress(data, -zlib.MAX_WBITS)
+            # we advertise deflate, so decode it too (raw or zlib-wrapped),
+            # capping the output for the same decompression-bomb reason
+            data = _inflate_capped(data)
         if encoding:
             return data.decode(encoding, errors="replace")
         # try utf-8 then gbk (chinese sources)
@@ -615,7 +646,7 @@ def tencent_quote(market, code, raw=False):
         key = "hk" + code.zfill(5)
     else:
         key = cn_prefix(code) + code
-    url = "https://qt.gtimg.cn/q=" + key
+    url = "https://qt.gtimg.cn/q=" + urllib.parse.quote(key, safe="")
     txt = fetch_resilient(url, headers={"Referer": "https://gu.qq.com"}, encoding="gbk")
     m = re.search(r'="([^"]*)"', txt)
     if not m or not m.group(1):
@@ -686,7 +717,7 @@ def sina_quote(market, code, raw=False):
         key = "hk" + code.zfill(5)
     else:
         key = cn_prefix(code) + code
-    url = "https://hq.sinajs.cn/list=" + key
+    url = "https://hq.sinajs.cn/list=" + urllib.parse.quote(key, safe="")
     txt = fetch_resilient(url, headers={"Referer": "https://finance.sina.com.cn"},
                           encoding="gbk")
     m = re.search(r'="([^"]*)"', txt)
@@ -755,7 +786,7 @@ def eastmoney_quote(market, code, raw=False):
     secid = eastmoney_secid(market, code)
     fields = "f43,f44,f45,f46,f47,f57,f58,f59,f60,f86,f168,f169,f170,f171"
     url = ("https://push2.eastmoney.com/api/qt/stock/get?secid="
-           + secid + "&fields=" + fields)
+           + urllib.parse.quote(secid, safe=".") + "&fields=" + fields)
     txt = fetch_resilient(url, headers={"Referer": "https://quote.eastmoney.com"})
     d = json.loads(txt)
     data = d.get("data")
@@ -807,7 +838,8 @@ def eastmoney_quote(market, code, raw=False):
 _MARKET_RANK = {"hk": 1, "cn": 2, "us": 3, "other": 9}
 _US_EXCH = {"NMS", "NYQ", "NGM", "NCM", "PCX", "ASE", "BTS", "NYS", "OPR",
             "PNK", "OTC", "OOTC"}
-_RESOLVE_CACHE = {}
+_RESOLVE_CACHE = OrderedDict()        # bounded LRU: key -> (result, ts)
+_RESOLVE_LOCK = threading.Lock()
 _RESOLVE_TTL = RESOLVE_CACHE_TTL
 
 
@@ -941,9 +973,11 @@ def resolve_symbol(query):
     """query (name/pinyin/english/code) -> {market, code, name, ...}."""
     q = query.strip()
     key = q.lower()
-    hit = _RESOLVE_CACHE.get(key)
-    if hit and time.time() - hit[1] < _RESOLVE_TTL:
-        return hit[0]
+    with _RESOLVE_LOCK:
+        hit = _RESOLVE_CACHE.get(key)
+        if hit and time.time() - hit[1] < _RESOLVE_TTL:
+            _RESOLVE_CACHE.move_to_end(key)
+            return hit[0]
 
     def _safe(eng):
         try:
@@ -970,7 +1004,11 @@ def resolve_symbol(query):
     result = {"market": chosen["market"], "code": chosen["code"],
               "name": chosen.get("name"), "matchedSymbol": chosen.get("symbol"),
               "alternatives": alts}
-    _RESOLVE_CACHE[key] = (result, time.time())
+    with _RESOLVE_LOCK:
+        _RESOLVE_CACHE[key] = (result, time.time())
+        _RESOLVE_CACHE.move_to_end(key)
+        while len(_RESOLVE_CACHE) > RESOLVE_CACHE_MAX:
+            _RESOLVE_CACHE.popitem(last=False)
     return result
 
 
@@ -1328,17 +1366,63 @@ USAGE = {
 }
 
 
+class _RateLimiter:
+    """Token-bucket per client IP.  The IP table is a bounded LRU so the
+    limiter itself can't be turned into a memory-exhaustion vector."""
+
+    def __init__(self, rpm, max_ips=4096):
+        self.rate = rpm / 60.0          # tokens per second
+        self.burst = max(1.0, rpm)      # bucket capacity (allows short spikes)
+        self.max_ips = max_ips
+        self._lock = threading.Lock()
+        self._buckets = OrderedDict()   # ip -> (tokens, last_monotonic)
+
+    def allow(self, ip):
+        if self.rate <= 0:
+            return True
+        now = time.monotonic()
+        with self._lock:
+            tokens, last = self._buckets.get(ip, (self.burst, now))
+            tokens = min(self.burst, tokens + (now - last) * self.rate)
+            ok = tokens >= 1.0
+            if ok:
+                tokens -= 1.0
+            self._buckets[ip] = (tokens, now)
+            self._buckets.move_to_end(ip)
+            while len(self._buckets) > self.max_ips:
+                self._buckets.popitem(last=False)
+            return ok
+
+
+RATE_LIMITER = _RateLimiter(RATE_LIMIT_RPM) if RATE_LIMIT_RPM > 0 else None
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "StockQuote/1.0"
+    timeout = SOCKET_TIMEOUT            # drop slow clients (anti-slowloris)
 
-    def _send(self, code, obj):
+    def _send(self, code, obj, extra_headers=None):
         body = json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
+
+    def _client_ip(self):
+        # Only trust forwarding headers when explicitly told we sit behind a
+        # known reverse proxy; otherwise they are attacker-controlled.
+        if TRUST_PROXY:
+            xr = self.headers.get("X-Real-IP")
+            if xr:
+                return xr.strip()
+            xff = self.headers.get("X-Forwarded-For")
+            if xff:
+                return xff.split(",")[-1].strip()
+        return self.client_address[0]
 
     def do_GET(self):
         # http.server decodes the request line as latin-1, so a client that
@@ -1360,6 +1444,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "time": datetime.now(timezone.utc).isoformat()})
         if path == "/favicon.ico":
             return self._send(404, {"ok": False})
+
+        # rate-limit only the endpoints that trigger outbound fetches; the
+        # cheap "/", "/health", "/favicon.ico" replies stay exempt so health
+        # checks and help never get throttled.
+        if RATE_LIMITER and (path == "/search" or path == "/quote"
+                             or path.startswith("/quote/")):
+            if not RATE_LIMITER.allow(self._client_ip()):
+                return self._send(429, {"ok": False, "error": "rate limited"},
+                                  extra_headers={"Retry-After": "60"})
 
         # ---- /search : resolve only ----
         if path == "/search":

@@ -6,20 +6,43 @@ services:
     image: ghcr.io/soulbasic/stockpricer:latest
     container_name: stockpricer
     restart: unless-stopped
-    # All values default below; override via the shell environment or a .env
-    # file (copy .env.example -> .env). See .env.example for descriptions.
+
+    # Bind to loopback by default: expose to the internet only through a
+    # reverse proxy (see deploy/). Set BIND_ADDR=0.0.0.0 to publish directly.
     ports:
-      - "${PORT:-8849}:${PORT:-8849}"
+      - "${BIND_ADDR:-127.0.0.1}:${PORT:-8849}:${PORT:-8849}"
+
+    # Every value defaults below; override via the shell or a .env file
+    # (copy .env.example -> .env). See .env.example for descriptions.
     environment:
       # --- network ---
-      HOST: "${HOST:-0.0.0.0}"                       # bind address inside the container
-      PORT: "${PORT:-8849}"                          # listen port
+      HOST: "${HOST:-0.0.0.0}"
+      PORT: "${PORT:-8849}"
       # --- timeouts / performance (seconds) ---
-      HTTP_TIMEOUT: "${HTTP_TIMEOUT:-12}"            # per-source upstream fetch timeout
-      QUOTE_TIMEOUT: "${QUOTE_TIMEOUT:-8}"          # overall budget to race a quote across sources
-      US_PREFER_GRACE: "${US_PREFER_GRACE:-2.5}"    # extra wait for the richer US source (pre/post/overnight)
+      HTTP_TIMEOUT: "${HTTP_TIMEOUT:-12}"
+      QUOTE_TIMEOUT: "${QUOTE_TIMEOUT:-8}"
+      US_PREFER_GRACE: "${US_PREFER_GRACE:-2.5}"
       # --- caching ---
-      RESOLVE_CACHE_TTL: "${RESOLVE_CACHE_TTL:-600}" # fuzzy-search / resolve cache TTL
+      RESOLVE_CACHE_TTL: "${RESOLVE_CACHE_TTL:-600}"
+      RESOLVE_CACHE_MAX: "${RESOLVE_CACHE_MAX:-1024}"
+      # --- hardening (matter when reachable from untrusted networks) ---
+      SOCKET_TIMEOUT: "${SOCKET_TIMEOUT:-20}"          # drop slow clients (anti-slowloris)
+      MAX_RESPONSE_BYTES: "${MAX_RESPONSE_BYTES:-5000000}"  # cap upstream body (anti-OOM / gzip bomb)
+      RATE_LIMIT_RPM: "${RATE_LIMIT_RPM:-120}"         # per-client req/min for /quote & /search (0 = off)
+      TRUST_PROXY: "${TRUST_PROXY:-0}"                 # 1 = honor X-Real-IP/X-Forwarded-For (set only behind a proxy)
+
+    # Contain blast radius: read-only rootfs, no new privileges, no caps,
+    # capped memory / process count.
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 256m
+    pids_limit: 256
+
     healthcheck:
       test: ["CMD", "python3", "-c", "import os,sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8849')+'/health',timeout=4).getcode()==200 else 1)"]
       interval: 30s

@@ -55,6 +55,11 @@ python3 stock_server.py --port 9000        # 或指定端口
 | `QUOTE_TIMEOUT` | `8` | 跨数据源竞速取价的总预算（秒） |
 | `US_PREFER_GRACE` | `2.5` | 为更丰富的美股源（盘前/盘后/夜盘）多等待的宽限（秒） |
 | `RESOLVE_CACHE_TTL` | `600` | 模糊搜索/解析结果缓存 TTL（秒） |
+| `RESOLVE_CACHE_MAX` | `1024` | 解析缓存最大条目数（LRU 淘汰，防内存增长） |
+| `SOCKET_TIMEOUT` | `20` | 客户端 socket 读超时（秒，防 slowloris 慢速攻击） |
+| `MAX_RESPONSE_BYTES` | `5000000` | 单个上游响应大小上限（防 OOM / 解压炸弹） |
+| `RATE_LIMIT_RPM` | `120` | 每客户端每分钟对 `/quote`、`/search` 的请求上限（`0` 关闭） |
+| `TRUST_PROXY` | `0` | 置 `1` 时信任 `X-Real-IP` / `X-Forwarded-For`（仅在反代后面开启） |
 
 ## 容器化部署 (Docker)
 
@@ -81,6 +86,20 @@ curl 'http://127.0.0.1:8849/quote?q=腾讯'
 ```
 
 镜像标签：`latest`（默认分支）、`master`、`sha-<short>`，以及打 `vX.Y.Z` tag 时的 `X.Y.Z` / `X.Y`。
+
+## 公网部署与安全
+
+服务本身是明文 HTTP，**不要把 8849 直接暴露公网**，应放在 TLS 反向代理后面：
+
+```
+client ──HTTPS──> 反代 (Caddy/nginx) ──HTTP──> 127.0.0.1:8849 (stockpricer)
+```
+
+- 内置防护：每客户端令牌桶限流（`RATE_LIMIT_RPM`）、socket 读超时防慢速攻击（`SOCKET_TIMEOUT`）、上游响应大小封顶防解压炸弹（`MAX_RESPONSE_BYTES`）、解析缓存 LRU 上限（`RESOLVE_CACHE_MAX`）。
+- 容器加固：非 root、只读根文件系统、`cap_drop: ALL`、`no-new-privileges`、内存/进程数上限（见 `docker-compose.yml`）。
+- compose 默认把端口绑在 `127.0.0.1`（`BIND_ADDR`），仅供同机反代访问；反代后请设 `TRUST_PROXY=1` 以便按真实客户端 IP 限流。
+
+现成反代配置见 [`deploy/`](deploy/)：`Caddyfile`（自动 HTTPS，最省事）、`nginx.conf`（含 `limit_req` 限流与超时）、以及 `deploy/README.md`。
 
 ## 接口
 
