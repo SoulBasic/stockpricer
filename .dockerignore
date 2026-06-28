@@ -1,0 +1,28 @@
+# VCS & CI
+.git
+.gitignore
+.github/
+
+# Python caches / envs
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+
+# Docs & local meta (not needed at runtime)
+*.md
+LICENSE
+selftest.sh
+
+# Docker meta
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+*.log
