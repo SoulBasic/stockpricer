@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Self-test the stock quote server. Usage: ./selftest.sh [port]
-PORT="${1:-8765}"
+PORT="${1:-8849}"
 B="http://127.0.0.1:${PORT}"
 pass=0; fail=0
 say(){ printf '%s\n' "$*"; }

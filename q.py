@@ -2,7 +2,7 @@
 # tiny CLI client: python3 q.py <query> [query2 ...]   (one line per result)
 import os, sys, json, time, urllib.parse, urllib.request
 
-PORT = int(os.environ.get("PORT", "8765"))      # override: PORT=8080 python3 q.py ...
+PORT = int(os.environ.get("PORT", "8849"))      # override: PORT=9000 python3 q.py ...
 BASE = "http://127.0.0.1:%d" % PORT
 
 

@@ -39,10 +39,22 @@
 ## 启动
 
 ```bash
-python3 stock_server.py --port 8765        # 默认 0.0.0.0:8080
+python3 stock_server.py                    # 默认 0.0.0.0:8849
+python3 stock_server.py --port 9000        # 或指定端口
 ```
 
-> 纯标准库、零依赖，Python 3.8+ 直接运行。`--host` / `--port` 也可用环境变量 `HOST` / `PORT` 覆盖（便于容器化）。
+> 纯标准库、零依赖，Python 3.8+ 直接运行。所有配置均可用环境变量覆盖（见下表），便于容器化。
+
+### 配置（环境变量）
+
+| 变量 | 默认 | 说明 |
+|----|----|----|
+| `HOST` | `0.0.0.0` | 监听地址（亦可 `--host`） |
+| `PORT` | `8849` | 监听端口（亦可 `--port`） |
+| `HTTP_TIMEOUT` | `12` | 单个上游数据源抓取超时（秒） |
+| `QUOTE_TIMEOUT` | `8` | 跨数据源竞速取价的总预算（秒） |
+| `US_PREFER_GRACE` | `2.5` | 为更丰富的美股源（盘前/盘后/夜盘）多等待的宽限（秒） |
+| `RESOLVE_CACHE_TTL` | `600` | 模糊搜索/解析结果缓存 TTL（秒） |
 
 ## 容器化部署 (Docker)
 
@@ -50,21 +62,22 @@ python3 stock_server.py --port 8765        # 默认 0.0.0.0:8080
 
 ```bash
 # 直接拉取运行（master 分支对应 latest）
-docker run -d --name stockpricer -p 8080:8080 ghcr.io/soulbasic/stockpricer:latest
+docker run -d --name stockpricer -p 8849:8849 ghcr.io/soulbasic/stockpricer:latest
 
 # 或本地构建
 docker build -t stockpricer .
-docker run -d -p 8080:8080 stockpricer
+docker run -d -p 8849:8849 stockpricer
 
-# 或用 compose
+# 或用 compose（推荐：变量集中在 docker-compose.yml / .env）
+cp .env.example .env        # 可选：按需修改变量
 docker compose up -d
 ```
 
-容器内置 `HEALTHCHECK`（探测 `/health`）。改端口：`-e PORT=9000 -p 9000:9000`。验证：
+容器内置 `HEALTHCHECK`（探测 `/health`）。所有上表变量均可通过 `-e VAR=值` 或 compose 的 `environment` 注入，例如改端口：`-e PORT=9000 -p 9000:9000`。验证：
 
 ```bash
-curl 'http://127.0.0.1:8080/health'
-curl 'http://127.0.0.1:8080/quote?q=腾讯'
+curl 'http://127.0.0.1:8849/health'
+curl 'http://127.0.0.1:8849/quote?q=腾讯'
 ```
 
 镜像标签：`latest`（默认分支）、`master`、`sha-<short>`，以及打 `vX.Y.Z` tag 时的 `X.Y.Z` / `X.Y`。
@@ -108,6 +121,6 @@ curl 'http://127.0.0.1:8080/quote?q=腾讯'
 ## 自测
 
 ```bash
-./selftest.sh 8765        # 22 项：状态码 + 模糊解析主上市地 + 各市场报价
+./selftest.sh             # 22 项：状态码 + 模糊解析主上市地 + 各市场报价（默认 8849）
 python3 q.py 腾讯 阿里巴巴 茅台 苹果 700 AAPL   # 命令行速查
 ```

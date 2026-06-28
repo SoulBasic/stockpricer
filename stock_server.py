@@ -22,7 +22,7 @@ fetches the page server-side and returns its body, bypassing the limit.
 Pure stdlib -- nothing to install.  Python 3.8+.
 
 Usage:
-    python3 stock_server.py [--port 8080] [--host 0.0.0.0]
+    python3 stock_server.py [--port 8849] [--host 0.0.0.0]
 
 Endpoints:
     GET /                      -> usage / help (JSON)
@@ -56,7 +56,12 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-DEFAULT_TIMEOUT = 12
+# Runtime configuration -- every value below can be overridden with an
+# environment variable, which makes containerized deployment easy to tune.
+DEFAULT_TIMEOUT   = float(os.environ.get("HTTP_TIMEOUT", "12"))      # per-source upstream fetch timeout (seconds)
+QUOTE_TIMEOUT     = float(os.environ.get("QUOTE_TIMEOUT", "8"))      # overall budget to race a quote across sources (seconds)
+US_PREFER_GRACE   = float(os.environ.get("US_PREFER_GRACE", "2.5"))  # extra wait for the richer US source: pre/post/overnight (seconds)
+RESOLVE_CACHE_TTL = int(os.environ.get("RESOLVE_CACHE_TTL", "600"))  # fuzzy-search / resolve cache TTL (seconds)
 
 
 # --------------------------------------------------------------------------- #
@@ -803,7 +808,7 @@ _MARKET_RANK = {"hk": 1, "cn": 2, "us": 3, "other": 9}
 _US_EXCH = {"NMS", "NYQ", "NGM", "NCM", "PCX", "ASE", "BTS", "NYS", "OPR",
             "PNK", "OTC", "OOTC"}
 _RESOLVE_CACHE = {}
-_RESOLVE_TTL = 600
+_RESOLVE_TTL = RESOLVE_CACHE_TTL
 
 
 def _has_cjk(s):
@@ -1036,13 +1041,13 @@ def race_market(market, code, raw=False):
         # yahoo+robinhood is the only source carrying live overnight(夜盘); give it
         # a generous grace so it wins whenever it answers within ~2.5s, falling
         # back to sina (盘后) / tencent only when it is genuinely slow.
-        return race(tasks, overall_timeout=8.0, prefer_grace=2.5)
+        return race(tasks, overall_timeout=QUOTE_TIMEOUT, prefer_grace=US_PREFER_GRACE)
     tasks = [
         (2, "tencent", lambda: tencent_quote(market, code, raw=raw)),
         (2, "sina", lambda: sina_quote(market, code, raw=raw)),
         (1, "eastmoney", lambda: eastmoney_quote(market, code, raw=raw)),
     ]
-    return race(tasks, overall_timeout=8.0, prefer_grace=0.0)
+    return race(tasks, overall_timeout=QUOTE_TIMEOUT, prefer_grace=0.0)
 
 
 def _looks_explicit(s):
@@ -1420,7 +1425,7 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default=os.environ.get("HOST", "0.0.0.0"))
-    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8080")))
+    ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8849")))
     args = ap.parse_args()
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     print("Stock quote server on http://%s:%d" % (args.host, args.port))

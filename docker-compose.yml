@@ -6,13 +6,22 @@ services:
     image: ghcr.io/soulbasic/stockpricer:latest
     container_name: stockpricer
     restart: unless-stopped
+    # All values default below; override via the shell environment or a .env
+    # file (copy .env.example -> .env). See .env.example for descriptions.
     ports:
-      - "8080:8080"
+      - "${PORT:-8849}:${PORT:-8849}"
     environment:
-      HOST: "0.0.0.0"
-      PORT: "8080"
+      # --- network ---
+      HOST: "${HOST:-0.0.0.0}"                       # bind address inside the container
+      PORT: "${PORT:-8849}"                          # listen port
+      # --- timeouts / performance (seconds) ---
+      HTTP_TIMEOUT: "${HTTP_TIMEOUT:-12}"            # per-source upstream fetch timeout
+      QUOTE_TIMEOUT: "${QUOTE_TIMEOUT:-8}"          # overall budget to race a quote across sources
+      US_PREFER_GRACE: "${US_PREFER_GRACE:-2.5}"    # extra wait for the richer US source (pre/post/overnight)
+      # --- caching ---
+      RESOLVE_CACHE_TTL: "${RESOLVE_CACHE_TTL:-600}" # fuzzy-search / resolve cache TTL
     healthcheck:
-      test: ["CMD", "python3", "-c", "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=4).getcode()==200 else 1)"]
+      test: ["CMD", "python3", "-c", "import os,sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8849')+'/health',timeout=4).getcode()==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3

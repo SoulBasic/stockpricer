@@ -32,3 +32,8 @@ Thumbs.db
 
 # Logs / local runtime
 *.log
+
+# Local env overrides (keep .env.example tracked)
+.env
+.env.*
+!.env.example
