@@ -60,6 +60,7 @@ python3 stock_server.py --port 9000        # 或指定端口
 | `MAX_RESPONSE_BYTES` | `5000000` | 单个上游响应大小上限（防 OOM / 解压炸弹） |
 | `RATE_LIMIT_RPM` | `120` | 每客户端每分钟对 `/quote`、`/search` 的请求上限（`0` 关闭） |
 | `TRUST_PROXY` | `0` | 置 `1` 时信任 `X-Real-IP` / `X-Forwarded-For`（仅在反代后面开启） |
+| `AUTH_TOKEN` | （空） | 设置后，除 `/health` 外所有请求都需带 `Authorization: Bearer <token>`；逗号分隔可配多个便于轮换；留空则关闭鉴权 |
 
 ## 容器化部署 (Docker)
 
@@ -95,6 +96,12 @@ curl 'http://127.0.0.1:8849/quote?q=腾讯'
 client ──HTTPS──> 反代 (Caddy/nginx) ──HTTP──> 127.0.0.1:8849 (stockpricer)
 ```
 
+- 鉴权（可选）：设 `AUTH_TOKEN` 后，除 `/health` 外所有请求都必须带 `Authorization: Bearer <token>`，否则返回 `401`。令牌用常数时间比较；逗号分隔可同时配多个，便于无缝轮换。健康探针走 `/health`，不受鉴权影响。
+
+  ```bash
+  AUTH_TOKEN=$(openssl rand -hex 32) docker compose up -d   # 生成并启用
+  curl -H "Authorization: Bearer <token>" 'http://127.0.0.1:8849/quote?q=腾讯'
+  ```
 - 内置防护：每客户端令牌桶限流（`RATE_LIMIT_RPM`）、socket 读超时防慢速攻击（`SOCKET_TIMEOUT`）、上游响应大小封顶防解压炸弹（`MAX_RESPONSE_BYTES`）、解析缓存 LRU 上限（`RESOLVE_CACHE_MAX`）。
 - 容器加固：非 root、只读根文件系统、`cap_drop: ALL`、`no-new-privileges`、内存/进程数上限（见 `docker-compose.yml`）。
 - compose 默认把端口绑在 `127.0.0.1`（`BIND_ADDR`），仅供同机反代访问；反代后请设 `TRUST_PROXY=1` 以便按真实客户端 IP 限流。

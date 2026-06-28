@@ -30,6 +30,8 @@ services:
       MAX_RESPONSE_BYTES: "${MAX_RESPONSE_BYTES:-5000000}"  # cap upstream body (anti-OOM / gzip bomb)
       RATE_LIMIT_RPM: "${RATE_LIMIT_RPM:-120}"         # per-client req/min for /quote & /search (0 = off)
       TRUST_PROXY: "${TRUST_PROXY:-0}"                 # 1 = honor X-Real-IP/X-Forwarded-For (set only behind a proxy)
+      # --- auth ---
+      AUTH_TOKEN: "${AUTH_TOKEN:-}"                    # set -> require `Authorization: Bearer <token>` (comma-separates to rotate; /health stays open)
 
     # Contain blast radius: read-only rootfs, no new privileges, no caps,
     # capped memory / process count.

@@ -43,6 +43,7 @@ import io
 import re
 import sys
 import time
+import hmac
 import threading
 import argparse
 import http.cookiejar
@@ -70,6 +71,11 @@ MAX_RESPONSE_BYTES = int(os.environ.get("MAX_RESPONSE_BYTES", "5000000")) # cap 
 SOCKET_TIMEOUT     = float(os.environ.get("SOCKET_TIMEOUT", "20"))        # client socket read timeout (anti-slowloris), seconds
 RATE_LIMIT_RPM     = float(os.environ.get("RATE_LIMIT_RPM", "120"))       # per-client req/min for /quote & /search (0 disables)
 TRUST_PROXY        = os.environ.get("TRUST_PROXY", "0").lower() in ("1", "true", "yes")  # honor X-Real-IP / X-Forwarded-For
+# Bearer-token auth: when AUTH_TOKEN is set, every request (except /health, kept
+# open for liveness probes) must carry `Authorization: Bearer <token>`.  Accepts
+# a comma-separated list so tokens can be rotated.  Empty -> auth disabled.
+AUTH_TOKENS = tuple(t for t in (s.strip() for s in
+                                os.environ.get("AUTH_TOKEN", "").split(",")) if t)
 
 
 # --------------------------------------------------------------------------- #
@@ -397,17 +403,24 @@ def normalize_yahoo_quote(market, code, q, raw=False):
             "changePercent": round2(num(q.get("postMarketChangePercent"))),
         }
 
-    # choose "active" price by session
-    price = reg
-    if state in ("PRE",) and pre_p is not None:
-        price = pre_p
+    # choose the "active" price + its timestamp by session.  Off-hours the
+    # headline is the freshest *real* trade, not the regular close: pre-market
+    # while PRE, after-hours while POST/POSTPOST, and -- crucially -- the last
+    # after-hours(盘后) print while the market is fully CLOSED (weekend /
+    # holiday) or in the pre-open overnight gap (PREPRE), since that print is
+    # newer than the regular close (e.g. Friday 盘后 over the weekend).
+    reg_ts = q.get("regularMarketTime")
+    post_ts = q.get("postMarketTime")
+    pre_ts = q.get("preMarketTime")
+    price, ts = reg, reg_ts
+    if state == "PRE" and pre_p is not None:
+        price, ts = pre_p, pre_ts or reg_ts
     elif state in ("POST", "POSTPOST") and post_p is not None:
-        price = post_p
-    elif state in ("PREPRE",) and post_p is not None:
-        # overnight gap before pre-open: last known extended price
-        price = post_p
+        price, ts = post_p, post_ts or reg_ts
+    elif (state in ("PREPRE", "CLOSED") and post_p is not None
+          and (not post_ts or not reg_ts or post_ts >= reg_ts)):
+        price, ts = post_p, post_ts or reg_ts
 
-    ts = q.get("regularMarketTime")
     out = {
         "ok": True,
         "symbol": q.get("symbol"),
@@ -747,10 +760,11 @@ def sina_quote(market, code, raw=False):
     else:  # us:  name,price,pct,time(beijing),change,prevclose?,open,high,low,...
         price = num(f[1])
         prev = num(f[26]) if len(f) > 26 else None   # f[26]=昨收
+        reg_chg, reg_pct = num(f[4]), num(f[2])
         out.update({
             "symbol": code.upper(), "name": f[0], "currency": "USD",
-            "price": price, "changePercent": num(f[2]),
-            "change": num(f[4]),
+            "price": price, "changePercent": reg_pct,
+            "change": reg_chg,
             "open": num(f[5]), "dayHigh": num(f[6]), "dayLow": num(f[7]),
             "previousClose": prev,
             "volume": num(f[10]),
@@ -768,12 +782,20 @@ def sina_quote(market, code, raw=False):
                     "time": f[24],
                 }
                 out["marketState"] = "POST"
+                # the after-hours(盘后) print is the latest real trade, so it --
+                # not the regular close -- is the headline price.  Keep the close
+                # in session.regular; top-level change stays vs previousClose(昨收).
+                out["session"]["regular"] = {"price": price, "change": reg_chg,
+                                             "changePercent": reg_pct}
+                out["price"] = post_price
+                out["change"] = round2(post_price - prev) if prev else None
+                out["changePercent"] = pct(post_price, prev)
     if out.get("change") is None and out.get("price") is not None and out.get("previousClose"):
         out["change"] = round2(out["price"] - out["previousClose"])
         out["changePercent"] = pct(out["price"], out["previousClose"])
-    out["session"]["regular"] = {"price": out.get("price"),
-                                 "change": out.get("change"),
-                                 "changePercent": out.get("changePercent")}
+    out["session"].setdefault("regular", {"price": out.get("price"),
+                                           "change": out.get("change"),
+                                           "changePercent": out.get("changePercent")})
     if raw:
         out["raw"] = m.group(1)
     return out
@@ -1260,6 +1282,16 @@ def build_markdown(r):
     sess = r.get("session") or {}
     state = r.get("marketState")
     akey = _STATE_KEY.get(state or "", "")
+    # When fully closed (weekend / holiday / overnight) the headline price may
+    # be a carried-over extended-session print (盘后/夜盘) rather than the
+    # regular close.  Bind the active session to whichever one matches the
+    # headline price so its move is shown vs 今收, not a close-to-close figure.
+    if not akey and r.get("price") is not None:
+        for k in ("overnight", "post", "pre"):
+            s = sess.get(k) or {}
+            if s.get("price") is not None and abs(s["price"] - r["price"]) < 1e-6:
+                akey = k
+                break
     act = sess.get(akey) or {}
 
     # headline change: the active session's own move (e.g. overnight vs today's
@@ -1412,6 +1444,21 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _authorized(self):
+        """True when no token is configured, or the request carries a valid
+        `Authorization: Bearer <token>` header.  Constant-time compared against
+        every configured token so a bad token can't be guessed by timing."""
+        if not AUTH_TOKENS:
+            return True
+        parts = self.headers.get("Authorization", "").split(None, 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            return False
+        got = parts[1].strip()
+        ok = False
+        for t in AUTH_TOKENS:                  # no early-exit -> no timing leak
+            ok |= hmac.compare_digest(got, t)
+        return ok
+
     def _client_ip(self):
         # Only trust forwarding headers when explicitly told we sit behind a
         # known reverse proxy; otherwise they are attacker-controlled.
@@ -1437,6 +1484,13 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
+
+        # Bearer-token gate (when AUTH_TOKEN is configured).  Checked before any
+        # work so unauthorized callers never trigger an outbound fetch.  /health
+        # and /favicon.ico stay open so liveness probes / browsers don't 401.
+        if path not in ("/health", "/favicon.ico") and not self._authorized():
+            return self._send(401, {"ok": False, "error": "unauthorized"},
+                              extra_headers={"WWW-Authenticate": 'Bearer realm="stockpricer"'})
 
         if path in ("/", "/help"):
             return self._send(200, USAGE)
