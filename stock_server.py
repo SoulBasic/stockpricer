@@ -11,9 +11,13 @@ endpoints used by their own websites:
 
   * Yahoo Finance   (v7 quote w/ crumb  +  v8 chart)  -> marketState, pre/post
   * Robinhood       (public /quotes/ endpoint)        -> regular + extended + overnight
-  * Tencent gtimg   (qt.gtimg.cn)                      -> US / HK / CN
-  * Sina hq         (hq.sinajs.cn)                     -> US / HK / CN
-  * Eastmoney push2 (push2.eastmoney.com)             -> US / HK / CN
+  * Tencent gtimg   (qt.gtimg.cn)                      -> HK / CN
+  * Sina hq         (hq.sinajs.cn)                     -> HK / CN
+  * Eastmoney push2 (push2.eastmoney.com)             -> HK / CN
+
+US quotes are served *only* by Yahoo + Robinhood.  The Chinese aggregators
+(tencent / sina / eastmoney) republish US pre-market / after-hours / overnight
+prices with a heavy lag, so they are never used -- raced or forced -- for US.
 
 When Yahoo is rate-limited / risk-controlled (HTTP 429) the request is
 retried through a public "reader" proxy (r.jina.ai / markdown.new) which
@@ -62,7 +66,6 @@ BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 # environment variable, which makes containerized deployment easy to tune.
 DEFAULT_TIMEOUT   = float(os.environ.get("HTTP_TIMEOUT", "12"))      # per-source upstream fetch timeout (seconds)
 QUOTE_TIMEOUT     = float(os.environ.get("QUOTE_TIMEOUT", "8"))      # overall budget to race a quote across sources (seconds)
-US_PREFER_GRACE   = float(os.environ.get("US_PREFER_GRACE", "2.5"))  # extra wait for the richer US source: pre/post/overnight (seconds)
 RESOLVE_CACHE_TTL = int(os.environ.get("RESOLVE_CACHE_TTL", "600"))  # fuzzy-search / resolve cache TTL (seconds)
 
 # Hardening knobs (matter when the port is reachable from untrusted networks).
@@ -493,6 +496,8 @@ _RH_HDRS = {"Accept": "application/json",
             "Origin": "https://robinhood.com",
             "Referer": "https://robinhood.com/"}
 
+_UNSET = object()          # "argument not supplied" sentinel (distinct from None)
+
 
 def robinhood_quote(code):
     url = "https://api.robinhood.com/quotes/?symbols=" + urllib.parse.quote(code)
@@ -540,17 +545,19 @@ def robinhood_overnight(code):
     }
 
 
-def normalize_robinhood(code, r, raw=False):
+def normalize_robinhood(code, r, raw=False, ov=_UNSET):
     reg = num(r.get("last_trade_price"))
     ext = num(r.get("last_extended_hours_trade_price"))
     prev = num(r.get("previous_close")) or num(r.get("adjusted_previous_close"))
 
     # `last_non_reg_trade_price` from /quotes/ freezes at the 8pm 盘后 close, so
-    # the real live overnight(夜盘) price comes from the 24/5 historicals.
-    try:
-        ov = robinhood_overnight(code)
-    except Exception:
-        ov = None
+    # the real live overnight(夜盘) price comes from the 24/5 historicals.  A
+    # caller that already fetched it can pass `ov` to avoid a redundant fetch.
+    if ov is _UNSET:
+        try:
+            ov = robinhood_overnight(code)
+        except Exception:
+            ov = None
     overnight = ov.get("price") if ov else None
 
     # the freshest non-regular price is the "active" one off-hours
@@ -595,11 +602,26 @@ def normalize_robinhood(code, r, raw=False):
 def us_yahoo_plus_robinhood(market, code, raw=False):
     """Primary US path: Yahoo (state + OHLC + pre/post) enriched with the live
     Robinhood overnight(夜盘) print.  Both upstreams are fetched concurrently so
-    the combined call costs ~max(yahoo, robinhood), not their sum."""
+    the combined call costs ~max(yahoo, robinhood), not their sum.
+
+    US is limited to Yahoo + Robinhood (the Chinese aggregators lag on
+    pre/post/overnight), so if Yahoo is unavailable we fall back to a
+    Robinhood-only quote -- which still carries regular + after-hours + live
+    overnight -- rather than dropping to a laggy source."""
     with ThreadPoolExecutor(max_workers=2) as ex:
         f_yahoo = ex.submit(YAHOO.quote, market, code)
         f_ov = ex.submit(robinhood_overnight, code)
-        yq = f_yahoo.result()
+        try:
+            yq = f_yahoo.result()
+        except Exception as e:          # yahoo down -> robinhood-only fallback
+            try:
+                ov = f_ov.result()
+            except Exception:
+                ov = None
+            base = normalize_robinhood(code, robinhood_quote(code), raw=raw, ov=ov)
+            base.setdefault("notes", []).append(
+                "yahoo unavailable; robinhood-only fallback (%s)" % e)
+            return base
         base = normalize_yahoo_quote(market, code, yq, raw=raw)
         try:
             ov = f_ov.result()
@@ -1043,6 +1065,11 @@ SOURCE_FUNCS = {
     "eastmoney": eastmoney_quote,
 }
 
+# US quotes are restricted to these two sources.  The Chinese aggregators
+# (tencent / sina / eastmoney) republish US pre-market / after-hours / overnight
+# prices with a heavy lag, so they are never used -- raced or forced -- for US.
+US_ALLOWED_SOURCES = ("yahoo", "robinhood")
+
 
 def race(tasks, overall_timeout=8.0, prefer_grace=0.0):
     """Run tasks concurrently, return the first acceptable result.
@@ -1090,18 +1117,15 @@ def race(tasks, overall_timeout=8.0, prefer_grace=0.0):
 
 def race_market(market, code, raw=False):
     if market == "us":
-        # yahoo+robinhood is the only US source with pre/post/overnight, so it
-        # gets the top rank and a wide grace window; sina carries after-hours
-        # (盘后) and outranks tencent (regular session only) as the fallback.
+        # US is restricted to Yahoo + Robinhood -- the Chinese aggregators
+        # (tencent / sina / eastmoney) lag badly on pre/post/overnight, so they
+        # are never raced for US.  us_yahoo_plus_robinhood already degrades to
+        # Robinhood-only when Yahoo is down, so it is the sole US path; wrap it
+        # in race() only to keep the QUOTE_TIMEOUT overall budget.
         tasks = [
-            (3, "yahoo+robinhood", lambda: us_yahoo_plus_robinhood("us", code, raw=raw)),
-            (2, "sina", lambda: sina_quote("us", code, raw=raw)),
-            (1, "tencent", lambda: tencent_quote("us", code, raw=raw)),
+            (1, "yahoo+robinhood", lambda: us_yahoo_plus_robinhood("us", code, raw=raw)),
         ]
-        # yahoo+robinhood is the only source carrying live overnight(夜盘); give it
-        # a generous grace so it wins whenever it answers within ~2.5s, falling
-        # back to sina (盘后) / tencent only when it is genuinely slow.
-        return race(tasks, overall_timeout=QUOTE_TIMEOUT, prefer_grace=US_PREFER_GRACE)
+        return race(tasks, overall_timeout=QUOTE_TIMEOUT, prefer_grace=0.0)
     tasks = [
         (2, "tencent", lambda: tencent_quote(market, code, raw=raw)),
         (2, "sina", lambda: sina_quote(market, code, raw=raw)),
@@ -1154,6 +1178,11 @@ def get_quote(query, market=None, source=None, raw=False, fuzzy=True):
     # ---- 2. forced single source (no race) ----
     if source:
         source = source.lower()
+        if market == "us" and source not in US_ALLOWED_SOURCES:
+            raise RuntimeError(
+                "source '%s' is not allowed for US stocks; use %s "
+                "(other providers lag on pre-market / after-hours / overnight)"
+                % (source, " or ".join(US_ALLOWED_SOURCES)))
         if source == "yahoo":
             res = normalize_yahoo_quote(market, code, YAHOO.quote(market, code), raw=raw)
         elif source == "robinhood":
@@ -1394,7 +1423,13 @@ USAGE = {
         "/quote?q=阿里巴巴", "/quote?q=茅台", "/quote?q=苹果",
         "/quote?symbol=AAPL", "/quote?symbol=600519",
     ],
-    "sources": ["yahoo", "robinhood", "tencent", "sina", "eastmoney"],
+    "sources": {
+        "us": ["yahoo", "robinhood"],
+        "hk": ["tencent", "sina", "eastmoney", "yahoo"],
+        "cn": ["tencent", "sina", "eastmoney", "yahoo"],
+    },
+    "note": ("US quotes use only Yahoo + Robinhood; tencent/sina/eastmoney lag "
+             "on US pre-market/after-hours/overnight and are rejected for US."),
 }
 
 

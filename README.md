@@ -17,7 +17,8 @@
 2. **快（一个源返回就走）**
    每个市场的多个数据源**并发竞速**，谁先返回用谁，不做多源交叉验证。
    港股/A股稳定在 **~80ms**；美股 **~0.6s**（Yahoo+Robinhood 并发合并，含时段拆分）。
-   美股给 Yahoo 一个 0.8s 的"优先窗口"以拿到带 `marketState` 的丰富数据，超时则回退到已就绪的快源。
+   美股只用 Yahoo + Robinhood：Yahoo 出 `marketState` / 盘前 / 盘后，Robinhood 补夜盘，
+   Yahoo 不可用时退到 Robinhood 单源；其余源在盘前/盘后/夜盘滞后，故对美股禁用。
 
 3. **抗频控（markdown.new / r.jina.ai 兜底）**
    直连优先（最快）。一旦某源被限频/封 IP（HTTP 429/403 或连接被重置），
@@ -29,12 +30,15 @@
 
 | 源 | 美股 | 港股 | A股 | 用途 |
 |----|----|----|----|----|
-| Yahoo (v7 quote + v8 chart) | ✓ | ✓ | ✓ | 美股 marketState / 盘前 / 盘后（主） |
-| Robinhood (公共 /quotes/) | ✓ | | | 美股夜盘 / 24h 成交价 |
-| Tencent `qt.gtimg.cn` | ✓ | ✓ | ✓ | 港股 / A股主源，最快最稳 |
-| Sina `hq.sinajs.cn` | ✓ | ✓ | ✓ | 备用，美股带盘后字段 |
-| Eastmoney `push2.eastmoney.com` | ✓ | ✓ | ✓ | 备用（被封时走代理绕过） |
+| Yahoo (v7 quote + v8 chart) | ✓ | ✓ | ✓ | 美股 marketState / 盘前 / 盘后（主）；港股/A股备用 |
+| Robinhood (公共 /quotes/) | ✓ | | | 美股夜盘 / 24h 成交价；Yahoo 不可用时兜底 |
+| Tencent `qt.gtimg.cn` | | ✓ | ✓ | 港股 / A股主源，最快最稳 |
+| Sina `hq.sinajs.cn` | | ✓ | ✓ | 港股 / A股备用 |
+| Eastmoney `push2.eastmoney.com` | | ✓ | ✓ | 港股 / A股备用（被封时走代理绕过） |
 | Tencent smartbox / Yahoo search | — | — | — | 模糊搜索 / 主上市地判定 |
+
+> **美股只用 Yahoo + Robinhood。** 腾讯 / 新浪 / 东财在美股盘前、盘后、夜盘的数据
+> 滞后严重，已从美股竞速与 `source=` 强制中禁用（对美股强制这些源会返回错误）。
 
 ## 启动
 
@@ -53,7 +57,6 @@ python3 stock_server.py --port 9000        # 或指定端口
 | `PORT` | `8849` | 监听端口（亦可 `--port`） |
 | `HTTP_TIMEOUT` | `12` | 单个上游数据源抓取超时（秒） |
 | `QUOTE_TIMEOUT` | `8` | 跨数据源竞速取价的总预算（秒） |
-| `US_PREFER_GRACE` | `2.5` | 为更丰富的美股源（盘前/盘后/夜盘）多等待的宽限（秒） |
 | `RESOLVE_CACHE_TTL` | `600` | 模糊搜索/解析结果缓存 TTL（秒） |
 | `RESOLVE_CACHE_MAX` | `1024` | 解析缓存最大条目数（LRU 淘汰，防内存增长） |
 | `SOCKET_TIMEOUT` | `20` | 客户端 socket 读超时（秒，防 slowloris 慢速攻击） |
