@@ -490,6 +490,47 @@ def _parse_iso_epoch(s):
 
 
 # --------------------------------------------------------------------------- #
+#  US market session by wall-clock (ET)                                        #
+# --------------------------------------------------------------------------- #
+def _us_eastern_offset(dt_utc):
+    """UTC offset (hours) for US Eastern at `dt_utc`: -4 during DST (2nd Sunday
+    of Mar .. 1st Sunday of Nov), else -5.  Best-effort (exact except within the
+    switch hour), which is all the session classification below needs."""
+    y = dt_utc.year
+    mar = datetime(y, 3, 8, 7, tzinfo=timezone.utc)     # 2:00 EST -> 07:00 UTC
+    dst_start = mar + timedelta(days=(6 - mar.weekday()) % 7)   # 2nd Sunday Mar
+    nov = datetime(y, 11, 1, 6, tzinfo=timezone.utc)    # 2:00 EDT -> 06:00 UTC
+    dst_end = nov + timedelta(days=(6 - nov.weekday()) % 7)     # 1st Sunday Nov
+    return -4 if dst_start <= dt_utc < dst_end else -5
+
+
+def us_session_now(now_utc=None):
+    """Current US session from the ET wall-clock: PRE / REGULAR / POST /
+    OVERNIGHT / CLOSED.  Best-effort (ignores holidays).  Used only on the
+    Robinhood-only path, which -- unlike Yahoo -- has no upstream marketState to
+    tell pre-market from after-hours / overnight."""
+    now_utc = now_utc or datetime.now(timezone.utc)
+    et = now_utc + timedelta(hours=_us_eastern_offset(now_utc))
+    wd = et.weekday()                       # 0=Mon .. 6=Sun
+    mins = et.hour * 60 + et.minute
+    if wd == 5:                             # Saturday: fully closed
+        return "CLOSED"
+    if wd == 6:                             # Sunday: overnight reopens 20:00 ET
+        return "OVERNIGHT" if mins >= 20 * 60 else "CLOSED"
+    if wd == 4 and mins >= 20 * 60:         # Friday 20:00 ET -> weekend
+        return "CLOSED"
+    if mins < 4 * 60:                       # 00:00-04:00 overnight
+        return "OVERNIGHT"
+    if mins < 9 * 60 + 30:                  # 04:00-09:30 pre-market
+        return "PRE"
+    if mins < 16 * 60:                      # 09:30-16:00 regular
+        return "REGULAR"
+    if mins < 20 * 60:                      # 16:00-20:00 after-hours
+        return "POST"
+    return "OVERNIGHT"                       # 20:00-24:00 overnight
+
+
+# --------------------------------------------------------------------------- #
 #  Robinhood (US, adds overnight / 24h trade price)                           #
 # --------------------------------------------------------------------------- #
 _RH_HDRS = {"Accept": "application/json",
@@ -559,20 +600,45 @@ def normalize_robinhood(code, r, raw=False, ov=_UNSET):
         except Exception:
             ov = None
     overnight = ov.get("price") if ov else None
+    ov_epoch = _parse_iso_epoch(ov.get("time")) if ov else None
+    ov_live = ov_epoch is not None and (time.time() - ov_epoch) < 20 * 60
 
-    # the freshest non-regular price is the "active" one off-hours
-    price = overnight or ext or reg
+    # Which session's price is *active* is decided by the ET wall-clock, not by
+    # a fixed overnight>ext>reg order: once pre-market opens (4am ET) the last
+    # overnight print is stale and the extended-hours (pre-market) print is the
+    # live one.  `ext` (last_extended_hours_trade_price) serves both pre & post.
+    sess = us_session_now()
+    if sess == "OVERNIGHT" and overnight is not None:
+        price, state = overnight, "OVERNIGHT"
+    elif sess in ("PRE", "POST") and ext is not None:
+        price, state = ext, sess
+    elif sess == "REGULAR" and reg is not None:
+        price, state = reg, "REGULAR"
+    else:                                   # closed / missing session print
+        price = ext if ext is not None else (reg if reg is not None else overnight)
+        state = None
+
+    # pre/post moves follow the Yahoo convention: quoted vs the regular close.
+    ext_row = None
+    if ext is not None:
+        ext_row = {"price": ext,
+                   "change": round2(ext - reg) if reg else None,
+                   "changePercent": pct(ext, reg)}
     session = {
         "regular": {"price": reg, "change": round2(reg - prev) if (reg and prev) else None,
                     "changePercent": pct(reg, prev)},
-        "pre": None,
-        "post": ({"price": ext, "changePercent": pct(ext, prev)} if ext else None),
+        "pre": ext_row if sess == "PRE" else None,
+        "post": ext_row if sess in ("POST", "OVERNIGHT", "CLOSED") else None,
         "overnight": ({"price": overnight,
+                       "change": round2(overnight - reg) if reg else None,
                        "changePercent": pct(overnight, reg or prev),
                        "high": ov.get("high"), "low": ov.get("low"),
                        "volume": ov.get("volume"),
-                       "time": ov.get("time")} if overnight else None),
+                       "time": ov.get("time"),
+                       "live": bool(ov_live)} if overnight else None),
     }
+    ts = ov.get("time") if state == "OVERNIGHT" and ov else (
+        r.get("venue_last_non_reg_trade_time") or r.get("updated_at"))
     out = {
         "ok": True,
         "symbol": code.upper(),
@@ -589,9 +655,9 @@ def normalize_robinhood(code, r, raw=False, ov=_UNSET):
         "ask": num(r.get("ask_price")),
         "change": round2(price - prev) if (price and prev) else None,
         "changePercent": pct(price, prev),
-        "marketState": None,
+        "marketState": state,
         "session": session,
-        "timestamp": r.get("venue_last_non_reg_trade_time") or r.get("updated_at"),
+        "timestamp": ts,
         "source": "robinhood",
     }
     if raw:
