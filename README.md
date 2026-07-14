@@ -143,7 +143,7 @@ client ──HTTPS──> 反代 (Caddy/nginx) ──HTTP──> 127.0.0.1:8849 
   "timestamp": "2026-07-14 20:25:10",
   "volume": 128340,
   "amount": null,
-  "markdown": "### Apple Inc. `AAPL` · US · 盘前\n\n# 213.46 USD\n\n<font color=\"info\">▲ +2.28 (+1.08%)</font>\n\n> 上个收盘价 211.18 · 价格时间 2026-07-14 20:25:10（北京时间）\n\n**成交量** 128.34K"
+  "markdown": "### Apple Inc. `AAPL` · US · 盘前\n\n# <font color=\"info\">213.46 USD</font>\n\n<font color=\"info\">▲ +2.28 (+1.08%)</font>\n\n> 上个收盘价 211.18 · 价格时间 2026-07-14 20:25:10（北京时间）\n\n**成交量** 128.34K"
 }
 ```
 
@@ -155,7 +155,8 @@ client ──HTTPS──> 反代 (Caddy/nginx) ──HTTP──> 127.0.0.1:8849 
 不会用盘中累计值代替。
 
 `markdown` 仅使用企业微信支持的标题、加粗、行内代码、引用及字体颜色语法；
-上涨为 `info`（绿色 ▲），下跌为 `warning`（橙红色 ▼），平盘为 `comment`（灰色 —）。
+当前价格与涨跌信息使用相同方向色：上涨为 `info`（绿色 ▲），下跌为 `warning`
+（橙红色 ▼），平盘为 `comment`（灰色 —）。
 
 ## 自测
 

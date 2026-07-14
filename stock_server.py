@@ -1384,14 +1384,18 @@ def _norm_ts(ts):
     return s
 
 
+def _quote_direction(change_percent):
+    """Return the WeCom color and marker for a quote direction."""
+    if (change_percent or 0) > 0:
+        return "info", "▲"
+    elif (change_percent or 0) < 0:
+        return "warning", "▼"
+    return "comment", "—"
+
+
 def _colored_change(change, change_percent):
     """Render a change using the three colors supported by WeCom Markdown."""
-    if (change_percent or 0) > 0:
-        color, arrow = "info", "▲"
-    elif (change_percent or 0) < 0:
-        color, arrow = "warning", "▼"
-    else:
-        color, arrow = "comment", "—"
+    color, arrow = _quote_direction(change_percent)
     return '<font color="%s">%s %s (%s)</font>' % (
         color, arrow, _fmt_chg(change), _fmt_pct(change_percent))
 
@@ -1465,7 +1469,9 @@ def build_markdown(r):
     state_cn = _STATE_CN.get(state or "", "")
     suffix = " · ".join(x for x in (mkt, state_cn) if x)
     title = "### %s `%s`%s" % (name, sym, (" · " + suffix) if suffix else "")
-    price_line = "# %s %s" % (_fmt_price(r.get("price")), cur)
+    color, _ = _quote_direction(r.get("changePercent"))
+    price_line = '# <font color="%s">%s %s</font>' % (
+        color, _fmt_price(r.get("price")), cur)
     change_line = _colored_change(r.get("change"), r.get("changePercent"))
     lines = [title, "", price_line, "", change_line]
 
