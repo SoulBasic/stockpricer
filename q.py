@@ -17,17 +17,10 @@ def one(q):
         return
     ms = int((time.time() - t0) * 1000)
     name = (d.get("name") or "")[:18]
-    sess = d.get("session") or {}
-    extra = ""
-    if d.get("market") == "US":
-        post = (sess.get("post") or {}).get("price")
-        ov = (sess.get("overnight") or {}).get("price")
-        reg = (sess.get("regular") or {}).get("price")
-        extra = " reg=%s post=%s overnight=%s" % (reg, post, ov)
-    print("  %-12s -> %-3s:%-8s %-18s price=%-9s %s state=%-8s src=%-14s %dms%s" % (
+    print("  %-12s -> %-3s:%-8s %-18s price=%-9s %s change=%s (%s%%) state=%-8s %dms" % (
         q, d.get("market", "?"), str(d.get("symbol", "?")), name,
-        d.get("price"), d.get("currency", ""), d.get("marketState"),
-        (d.get("source") or "")[:14], ms, extra))
+        d.get("price"), d.get("currency", ""), d.get("change"),
+        d.get("changePercent"), d.get("marketState"), ms))
 
 
 for q in sys.argv[1:]:

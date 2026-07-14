@@ -16,7 +16,7 @@
 
 2. **快（一个源返回就走）**
    每个市场的多个数据源**并发竞速**，谁先返回用谁，不做多源交叉验证。
-   港股/A股稳定在 **~80ms**；美股 **~0.6s**（Yahoo+Robinhood 并发合并，含时段拆分）。
+   港股/A股稳定在 **~80ms**；美股 **~0.6s**（Yahoo+Robinhood 并发合并，自动选择当前时段）。
    美股只用 Yahoo + Robinhood：Yahoo 出 `marketState` / 盘前 / 盘后，Robinhood 补夜盘，
    Yahoo 不可用时退到 Robinhood 单源；其余源在盘前/盘后/夜盘滞后，故对美股禁用。
 
@@ -126,26 +126,33 @@ client ──HTTPS──> 反代 (Caddy/nginx) ──HTTP──> 127.0.0.1:8849 
 | `GET /search?q=腾讯` | 只做解析：返回命中代码 + 其它上市地(alternatives) |
 | `GET /health` / `GET /` | 健康检查 / 用法 |
 
-## 返回示例（美股，盘后/夜盘时段）
+## 返回示例（美股盘前）
 
 ```json
 {
-  "ok": true, "query": "苹果", "market": "US", "symbol": "AAPL", "code": "AAPL",
-  "name": "Apple Inc.", "currency": "USD", "price": 295.64,
-  "previousClose": 298.01, "change": -2.37, "changePercent": -0.80,
-  "marketState": "OVERNIGHT",
-  "session": {
-    "regular":   {"price": 297.01, "changePercent": -0.34},
-    "pre":       null,
-    "post":      {"price": 295.65, "changePercent": -0.46},
-    "overnight": {"price": 295.64, "time": "2026-06-22T23:59:33Z"}
-  },
-  "resolved": {"market": "us", "code": "AAPL", "name": "Apple Inc.", "alternatives": []},
-  "source": "yahoo+robinhood", "latencyMs": 612
+  "ok": true,
+  "symbol": "AAPL",
+  "name": "Apple Inc.",
+  "market": "US",
+  "currency": "USD",
+  "marketState": "PRE",
+  "price": 213.46,
+  "previousClose": 211.18,
+  "change": 2.28,
+  "changePercent": 1.0796,
+  "timestamp": "2026-07-14 20:25:10",
+  "volume": 128340,
+  "amount": null,
+  "markdown": "### Apple Inc. `AAPL` · US · 盘前\n\n## 213.46 USD　🔴 +2.28（+1.08%）\n\n> 上个收盘价 211.18 · 价格时间 2026-07-14 20:25:10（北京时间）\n\n**成交量** 128.34K"
 }
 ```
 
 `marketState`: `PRE` / `REGULAR` / `POST` / `OVERNIGHT` / `CLOSED`。
+
+接口只返回当前有效时段的行情，不再展开其它时段。`previousClose` 始终是当前时段的
+最近一次常规盘收盘价：盘前/盘中对应上个交易日收盘价，盘后/夜盘对应当天常规盘收盘价；
+`change` 和 `changePercent` 均以它为基准。扩展时段上游没有成交量/额时返回 `null`，
+不会用盘中累计值代替。
 
 ## 自测
 

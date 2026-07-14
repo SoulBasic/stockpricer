@@ -388,6 +388,9 @@ def normalize_yahoo_quote(market, code, q, raw=False):
             "price": reg,
             "change": round2(num(q.get("regularMarketChange"))),
             "changePercent": round2(num(q.get("regularMarketChangePercent"))),
+            "time": iso_from_epoch(q.get("regularMarketTime")),
+            "volume": num(q.get("regularMarketVolume")),
+            "amount": num(q.get("regularMarketTurnover")),
         },
         "pre": None,
         "post": None,
@@ -398,12 +401,18 @@ def normalize_yahoo_quote(market, code, q, raw=False):
             "price": pre_p,
             "change": round2(num(q.get("preMarketChange"))),
             "changePercent": round2(num(q.get("preMarketChangePercent"))),
+            "time": iso_from_epoch(q.get("preMarketTime")),
+            "volume": num(q.get("preMarketVolume")),
+            "amount": num(q.get("preMarketTurnover")),
         }
     if post_p is not None:
         session["post"] = {
             "price": post_p,
             "change": round2(num(q.get("postMarketChange"))),
             "changePercent": round2(num(q.get("postMarketChangePercent"))),
+            "time": iso_from_epoch(q.get("postMarketTime")),
+            "volume": num(q.get("postMarketVolume")),
+            "amount": num(q.get("postMarketTurnover")),
         }
 
     # choose the "active" price + its timestamp by session.  Off-hours the
@@ -623,10 +632,14 @@ def normalize_robinhood(code, r, raw=False, ov=_UNSET):
     if ext is not None:
         ext_row = {"price": ext,
                    "change": round2(ext - reg) if reg else None,
-                   "changePercent": pct(ext, reg)}
+                   "changePercent": pct(ext, reg),
+                   "time": r.get("venue_last_non_reg_trade_time"),
+                   "volume": None,
+                   "amount": None}
     session = {
         "regular": {"price": reg, "change": round2(reg - prev) if (reg and prev) else None,
-                    "changePercent": pct(reg, prev)},
+                    "changePercent": pct(reg, prev),
+                    "time": r.get("updated_at"), "volume": None, "amount": None},
         "pre": ext_row if sess == "PRE" else None,
         "post": ext_row if sess in ("POST", "OVERNIGHT", "CLOSED") else None,
         "overnight": ({"price": overnight,
@@ -634,6 +647,7 @@ def normalize_robinhood(code, r, raw=False, ov=_UNSET):
                        "changePercent": pct(overnight, reg or prev),
                        "high": ov.get("high"), "low": ov.get("low"),
                        "volume": ov.get("volume"),
+                       "amount": None,
                        "time": ov.get("time"),
                        "live": bool(ov_live)} if overnight else None),
     }
@@ -780,6 +794,18 @@ def tencent_quote(market, code, raw=False):
             ts = f[30]
     except (IndexError, ValueError):
         pass
+    # Tencent reports A-share volume in lots (手), while HK volume is shares.
+    # The exact turnover is embedded in field 35 for A-shares and in field 37
+    # for HK stocks.
+    amount = None
+    if market == "cn":
+        vol = vol * 100 if vol is not None else None
+        try:
+            amount = num(f[35].split("/")[2])
+        except (IndexError, ValueError):
+            amount = None
+    elif market == "hk":
+        amount = num(f[37]) if len(f) > 37 else None
     if change is None and price is not None and prev:
         change, changep = round2(price - prev), pct(price, prev)
     cur = {"us": "USD", "hk": "HKD", "cn": "CNY"}[market]
@@ -795,6 +821,7 @@ def tencent_quote(market, code, raw=False):
         "dayHigh": high,
         "dayLow": low,
         "volume": vol,
+        "amount": amount,
         "change": round2(change),
         "changePercent": round2(changep),
         "marketState": None,
@@ -834,6 +861,7 @@ def sina_quote(market, code, raw=False):
             "open": num(f[1]), "previousClose": num(f[2]),
             "price": num(f[3]), "dayHigh": num(f[4]), "dayLow": num(f[5]),
             "volume": num(f[8]),
+            "amount": num(f[9]),
             "timestamp": (f[30] + " " + f[31]) if len(f) > 31 else None,
         })
     elif market == "hk":
@@ -843,6 +871,7 @@ def sina_quote(market, code, raw=False):
             "open": num(f[2]), "previousClose": num(f[3]),
             "dayHigh": num(f[4]), "dayLow": num(f[5]), "price": num(f[6]),
             "change": num(f[7]), "changePercent": num(f[8]),
+            "amount": num(f[11]), "volume": num(f[12]),
             "timestamp": (f[17] + " " + f[18]) if len(f) > 18 else None,
         })
     else:  # us:  name,price,pct,time(beijing),change,prevclose?,open,high,low,...
@@ -894,7 +923,7 @@ def sina_quote(market, code, raw=False):
 # --------------------------------------------------------------------------- #
 def eastmoney_quote(market, code, raw=False):
     secid = eastmoney_secid(market, code)
-    fields = "f43,f44,f45,f46,f47,f57,f58,f59,f60,f86,f168,f169,f170,f171"
+    fields = "f43,f44,f45,f46,f47,f48,f57,f58,f59,f60,f86,f168,f169,f170,f171"
     url = ("https://push2.eastmoney.com/api/qt/stock/get?secid="
            + urllib.parse.quote(secid, safe=".") + "&fields=" + fields)
     txt = fetch_resilient(url, headers={"Referer": "https://quote.eastmoney.com"})
@@ -925,7 +954,9 @@ def eastmoney_quote(market, code, raw=False):
         "open": sc(data.get("f46")),
         "dayHigh": sc(data.get("f44")),
         "dayLow": sc(data.get("f45")),
-        "volume": num(data.get("f47")),
+        "volume": (num(data.get("f47")) * 100 if market == "cn" and
+                   num(data.get("f47")) is not None else num(data.get("f47"))),
+        "amount": num(data.get("f48")),
         "change": round2(change / scale) if change is not None else (
             round2(price - prev) if (price and prev) else None),
         "changePercent": round2(changep / 100.0) if changep is not None else pct(price, prev),
@@ -1292,8 +1323,6 @@ def get_quote(query, market=None, source=None, raw=False, fuzzy=True):
 # --------------------------------------------------------------------------- #
 _STATE_CN = {"PRE": "盘前", "REGULAR": "盘中", "POST": "盘后",
              "OVERNIGHT": "夜盘", "CLOSED": "已收盘"}
-_SESSION_ROWS = [("pre", "盘前"), ("regular", "盘中"), ("post", "盘后"),
-                 ("overnight", "夜盘")]
 _STATE_KEY = {"PRE": "pre", "REGULAR": "regular", "POST": "post",
               "OVERNIGHT": "overnight"}
 
@@ -1312,7 +1341,7 @@ def _fmt_chg(v):
     return "-" if v is None else "%+.2f" % v
 
 
-def _fmt_vol(v):
+def _fmt_size(v):
     if v is None:
         return "-"
     v = float(v)
@@ -1355,108 +1384,100 @@ def _norm_ts(ts):
     return s
 
 
-def _arrow(v):
-    return "🔺" if (v or 0) > 0 else ("🔻" if (v or 0) < 0 else "➖")
+def _direction(v):
+    """Chinese-market convention: red rises, green falls."""
+    return "🔴" if (v or 0) > 0 else ("🟢" if (v or 0) < 0 else "⚪")
 
 
-def _row(cells, bold=False):
-    if bold:
-        cells = ["**%s**" % c for c in cells]
-    return "| " + " | ".join(cells) + " |"
+def compact_quote(r):
+    """Project an upstream-rich quote onto the single currently active view.
+
+    Extended-hours moves use the immediately preceding regular close, which is
+    the convention used by mainstream quote screens.  In pre-market this is
+    yesterday's close; in post-market/overnight it is today's regular close.
+    Volume and turnover never fall back from an extended session to the regular
+    session, because that would label stale day-session totals as current.
+    """
+    sessions = r.get("session") or {}
+    state = r.get("marketState")
+    active_key = _STATE_KEY.get(state or "")
+
+    # CLOSED can still carry the latest post/overnight print.  Identify which
+    # session owns the headline without exposing every historical session.
+    if not active_key and r.get("price") is not None:
+        for key in ("overnight", "post", "pre", "regular"):
+            row = sessions.get(key) or {}
+            if (row.get("price") is not None and
+                    abs(row["price"] - r["price"]) < 1e-6):
+                active_key = key
+                break
+
+    active = sessions.get(active_key) or {}
+    price = r.get("price")
+    regular_close = (sessions.get("regular") or {}).get("price")
+    if active_key in ("pre", "post", "overnight") and regular_close is not None:
+        previous_close = regular_close
+    else:
+        previous_close = r.get("previousClose")
+
+    change = (round2(price - previous_close)
+              if price is not None and previous_close not in (None, 0) else None)
+    change_percent = pct(price, previous_close)
+    is_extended = active_key in ("pre", "post", "overnight")
+    volume = active.get("volume") if is_extended else r.get("volume")
+    amount = active.get("amount") if is_extended else r.get("amount")
+    timestamp = _norm_ts(active.get("time")) or _norm_ts(r.get("timestamp"))
+
+    out = {
+        "ok": bool(r.get("ok")),
+        "symbol": r.get("symbol") or r.get("code"),
+        "name": r.get("name"),
+        "market": r.get("market"),
+        "currency": r.get("currency"),
+        "marketState": state,
+        "price": price,
+        "previousClose": previous_close,
+        "change": change,
+        "changePercent": change_percent,
+        "timestamp": timestamp,
+        "volume": volume,
+        "amount": amount,
+    }
+    if "raw" in r:
+        out["raw"] = r["raw"]
+    return out
 
 
 def build_markdown(r):
-    """Render the market-data fields of a normalized quote into one
-    display-ready markdown block.  The current price is the focal point
-    (big heading); below it sit the per-session breakdown, day range and a
-    Beijing-time stamp."""
+    """Render one clean Markdown view for the current session only."""
     cur = r.get("currency") or ""
     name = r.get("name") or r.get("symbol") or r.get("code") or "?"
     sym = r.get("symbol") or r.get("code") or ""
     mkt = r.get("market") or ""
-    sess = r.get("session") or {}
     state = r.get("marketState")
-    akey = _STATE_KEY.get(state or "", "")
-    # When fully closed (weekend / holiday / overnight) the headline price may
-    # be a carried-over extended-session print (盘后/夜盘) rather than the
-    # regular close.  Bind the active session to whichever one matches the
-    # headline price so its move is shown vs 今收, not a close-to-close figure.
-    if not akey and r.get("price") is not None:
-        for k in ("overnight", "post", "pre"):
-            s = sess.get(k) or {}
-            if s.get("price") is not None and abs(s["price"] - r["price"]) < 1e-6:
-                akey = k
-                break
-    act = sess.get(akey) or {}
-
-    # headline change: the active session's own move (e.g. overnight vs today's
-    # close), falling back to the top-level change (vs previous close).
-    chg = act.get("change") if act.get("change") is not None else r.get("change")
-    chgp = (act.get("changePercent") if act.get("changePercent") is not None
-            else r.get("changePercent"))
-    reg_close = (sess.get("regular") or {}).get("price")
-    if akey in ("pre", "post", "overnight") and reg_close is not None:
-        ref_label, ref_val = "今收", reg_close
-    else:
-        ref_label, ref_val = "昨收", r.get("previousClose")
-
-    # ---- title + prominent current price ----
     state_cn = _STATE_CN.get(state or "", "")
-    live = "🟢实时" if (akey == "overnight" and act.get("live")) else ""
-    title = "### %s　`%s`・%s%s" % (
-        name, sym, mkt, ("・" + state_cn + live) if state_cn else "")
-    price_line = "# %s %s　%s %s（%s）" % (
-        _fmt_price(r.get("price")), cur, _arrow(chgp), _fmt_chg(chg), _fmt_pct(chgp))
+    suffix = " · ".join(x for x in (mkt, state_cn) if x)
+    title = "### %s `%s`%s" % (name, sym, (" · " + suffix) if suffix else "")
+    price_line = "## %s %s　%s %s（%s）" % (
+        _fmt_price(r.get("price")), cur, _direction(r.get("changePercent")),
+        _fmt_chg(r.get("change")), _fmt_pct(r.get("changePercent")))
     lines = [title, "", price_line]
 
-    ts = _norm_ts(act.get("time")) or _norm_ts(r.get("timestamp"))
     sub = []
-    if ref_val is not None:
-        sub.append("较%s %s" % (ref_label, _fmt_price(ref_val)))
-    if ts:
-        sub.append("更新于 %s（北京时间）" % ts)
+    if r.get("previousClose") is not None:
+        sub.append("上个收盘价 %s" % _fmt_price(r["previousClose"]))
+    if r.get("timestamp"):
+        sub.append("价格时间 %s（北京时间）" % r["timestamp"])
     if sub:
-        lines += ["", "> " + "　·　".join(sub)]
+        lines += ["", "> " + " · ".join(sub)]
 
-    # ---- per-session breakdown (US extended hours) ----
-    if sess.get("pre") or sess.get("post") or sess.get("overnight"):
-        rows = ["| 时段 | 现价 | 涨跌 | 涨跌幅 |", "| :-- | --: | --: | --: |"]
-        for key, label in _SESSION_ROWS:
-            s = sess.get(key)
-            if not s or s.get("price") is None:
-                continue
-            tag = label + (" 🟢" if (key == "overnight" and s.get("live")) else "")
-            rows.append(_row([tag, _fmt_price(s.get("price")),
-                              _fmt_chg(s.get("change")), _fmt_pct(s.get("changePercent"))],
-                             bold=(key == akey)))
-        if len(rows) > 2:
-            lines += [""] + rows
-
-    # ---- day range / fundamentals ----
     facts = []
-    for key, label in (("previousClose", "昨收"), ("open", "今开"),
-                       ("dayHigh", "最高"), ("dayLow", "最低")):
-        if r.get(key) is not None:
-            facts.append("**%s** %s" % (label, _fmt_price(r[key])))
     if r.get("volume") is not None:
-        facts.append("**成交量** %s" % _fmt_vol(r["volume"]))
+        facts.append("**成交量** %s" % _fmt_size(r["volume"]))
+    if r.get("amount") is not None:
+        facts.append("**成交额** %s %s" % (_fmt_size(r["amount"]), cur))
     if facts:
-        lines += ["", "　·　".join(facts)]
-
-    # ---- overnight own range ----
-    ov = sess.get("overnight") or {}
-    if ov.get("price") is not None and (ov.get("high") is not None
-                                        or ov.get("low") is not None):
-        od = []
-        if ov.get("low") is not None and ov.get("high") is not None:
-            od.append("**夜盘区间** %s – %s" % (_fmt_price(ov["low"]), _fmt_price(ov["high"])))
-        if ov.get("volume") is not None:
-            od.append("**夜盘量** %s" % _fmt_vol(ov["volume"]))
-        if od:
-            lines.append("　·　".join(od))
-
-    if r.get("source"):
-        lines += ["", "<sub>数据来源 %s</sub>" % r["source"]]
+        lines += ["", " · ".join(facts)]
     return "\n".join(lines)
 
 
@@ -1654,6 +1675,7 @@ class Handler(BaseHTTPRequestHandler):
                 if isinstance(_s, dict) and _s.get("time"):
                     _s["time"] = _norm_ts(_s["time"])
             try:
+                res = compact_quote(res)
                 res["markdown"] = build_markdown(res)
             except Exception as e:  # markdown is best-effort, never fatal
                 res["markdown"] = None

@@ -8,9 +8,10 @@ say(){ printf '%s\n' "$*"; }
 pp(){ python3 -c "import sys,json
 d=json.load(sys.stdin)
 r=d.get('resolved') or {}
-print(f\"  {str(d.get('query') or d.get('symbol','')):12s} -> {d.get('market','?')}:{str(d.get('symbol','')):9s} {(d.get('name') or '')[:16]:16s} price={d.get('price')} {d.get('currency','')} state={d.get('marketState')} src={d.get('source','')[:14]}\")"; }
+print(f\"  {str(d.get('symbol','')):12s} -> {d.get('market','?')}:{str(d.get('symbol','')):9s} {(d.get('name') or '')[:16]:16s} price={d.get('price')} {d.get('currency','')} change={d.get('change')} ({d.get('changePercent')}%) state={d.get('marketState')}\")"; }
 
 geturl(){ curl -s -G "$B/quote" --data-urlencode "q=$1"; }
+searchurl(){ curl -s -G "$B/search" --data-urlencode "q=$1"; }
 
 check(){ # check "label" expected_http "url"
   code=$(curl -s -o /tmp/_b -w '%{http_code}' "$3")
@@ -19,7 +20,7 @@ check(){ # check "label" expected_http "url"
 
 # expect a fuzzy query to resolve to a given market:code
 expect(){ # expect "query" "market:code"
-  got=$(geturl "$1" | python3 -c "import sys,json;d=json.load(sys.stdin);print(f\"{d.get('market','?').lower()}:{d.get('code','')}\")" 2>/dev/null)
+  got=$(searchurl "$1" | python3 -c "import sys,json;d=json.load(sys.stdin);print(f\"{d.get('market','?').lower()}:{d.get('code','')}\")" 2>/dev/null)
   norm=$(printf '%s' "$got" | sed 's/:0*/:/')        # ignore zero-padding
   want=$(printf '%s' "$2"  | sed 's/:0*/:/')
   if [ "$norm" = "$want" ]; then pass=$((pass+1)); printf 'OK   %-12s -> %-12s\n' "$1" "$got";
