@@ -1384,9 +1384,16 @@ def _norm_ts(ts):
     return s
 
 
-def _direction(v):
-    """Chinese-market convention: red rises, green falls."""
-    return "🔴" if (v or 0) > 0 else ("🟢" if (v or 0) < 0 else "⚪")
+def _colored_change(change, change_percent):
+    """Render a change using the three colors supported by WeCom Markdown."""
+    if (change_percent or 0) > 0:
+        color, arrow = "info", "▲"
+    elif (change_percent or 0) < 0:
+        color, arrow = "warning", "▼"
+    else:
+        color, arrow = "comment", "—"
+    return '<font color="%s">%s %s (%s)</font>' % (
+        color, arrow, _fmt_chg(change), _fmt_pct(change_percent))
 
 
 def compact_quote(r):
@@ -1458,10 +1465,9 @@ def build_markdown(r):
     state_cn = _STATE_CN.get(state or "", "")
     suffix = " · ".join(x for x in (mkt, state_cn) if x)
     title = "### %s `%s`%s" % (name, sym, (" · " + suffix) if suffix else "")
-    price_line = "## %s %s　%s %s（%s）" % (
-        _fmt_price(r.get("price")), cur, _direction(r.get("changePercent")),
-        _fmt_chg(r.get("change")), _fmt_pct(r.get("changePercent")))
-    lines = [title, "", price_line]
+    price_line = "# %s %s" % (_fmt_price(r.get("price")), cur)
+    change_line = _colored_change(r.get("change"), r.get("changePercent"))
+    lines = [title, "", price_line, "", change_line]
 
     sub = []
     if r.get("previousClose") is not None:
@@ -1477,7 +1483,7 @@ def build_markdown(r):
     if r.get("amount") is not None:
         facts.append("**成交额** %s %s" % (_fmt_size(r["amount"]), cur))
     if facts:
-        lines += ["", " · ".join(facts)]
+        lines += [""] + facts
     return "\n".join(lines)
 
 

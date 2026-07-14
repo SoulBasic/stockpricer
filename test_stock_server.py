@@ -84,14 +84,19 @@ class CompactQuoteTests(unittest.TestCase):
         self.assertIsNone(result["volume"])
         self.assertIsNone(result["amount"])
 
-    def test_markdown_is_single_session_and_uses_red_green_markers(self):
+    def test_markdown_uses_only_supported_red_green_color_tags(self):
         rising = build_markdown(compact_quote(self.quote("PRE", 101.0)))
         falling_quote = self.quote("POST", 98.0)
         falling_quote["session"]["post"]["price"] = 98.0
         falling = build_markdown(compact_quote(falling_quote))
+        flat_quote = self.quote("REGULAR", 95.0)
+        flat = build_markdown(compact_quote(flat_quote))
 
-        self.assertIn("🔴 +1.00（+1.00%）", rising)
-        self.assertIn("🟢 -2.00（-2.00%）", falling)
+        self.assertIn('<font color="info">▲ +1.00 (+1.00%)</font>', rising)
+        self.assertIn('<font color="warning">▼ -2.00 (-2.00%)</font>', falling)
+        self.assertIn('<font color="comment">— +0.00 (+0.00%)</font>', flat)
+        self.assertNotIn("🔴", rising)
+        self.assertNotIn("🟢", falling)
         self.assertIn("上个收盘价", rising)
         self.assertNotIn("| 时段 |", rising)
         self.assertNotIn("盘后", rising)
