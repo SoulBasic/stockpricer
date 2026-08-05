@@ -450,6 +450,8 @@ def normalize_yahoo_quote(market, code, q, raw=False):
         "marketState": map_us_state(state),
         "session": session,
         "timestamp": iso_from_epoch(ts),
+        "marketCap": num(q.get("marketCap")),
+        "pe": num(q.get("trailingPE")),
         "source": "yahoo",
     }
     if raw:
@@ -672,6 +674,8 @@ def normalize_robinhood(code, r, raw=False, ov=_UNSET):
         "marketState": state,
         "session": session,
         "timestamp": ts,
+        "marketCap": None,
+        "pe": None,
         "source": "robinhood",
     }
     if raw:
@@ -806,6 +810,10 @@ def tencent_quote(market, code, raw=False):
             amount = None
     elif market == "hk":
         amount = num(f[37]) if len(f) > 37 else None
+    # Tencent reports total market cap in field 45, in 100-million currency
+    # units for both HK and mainland stocks. Field 39 is its published PE.
+    market_cap = num(f[45]) * 1e8 if len(f) > 45 and num(f[45]) is not None else None
+    pe = num(f[39]) if len(f) > 39 else None
     if change is None and price is not None and prev:
         change, changep = round2(price - prev), pct(price, prev)
     cur = {"us": "USD", "hk": "HKD", "cn": "CNY"}[market]
@@ -828,6 +836,8 @@ def tencent_quote(market, code, raw=False):
         "session": {"regular": {"price": price, "change": round2(change),
                                 "changePercent": round2(changep)}},
         "timestamp": ts,
+        "marketCap": market_cap,
+        "pe": pe,
         "source": "tencent",
     }
     if raw:
@@ -853,7 +863,8 @@ def sina_quote(market, code, raw=False):
         raise RuntimeError("sina empty for " + key)
     f = m.group(1).split(",")
     out = {"ok": True, "market": market.upper(), "source": "sina",
-           "session": {}, "marketState": None}
+           "session": {}, "marketState": None, "marketCap": None,
+           "pe": None}
     if market == "cn":
         # name,open,prevclose,price,high,low,...,date,time
         out.update({
@@ -923,7 +934,8 @@ def sina_quote(market, code, raw=False):
 # --------------------------------------------------------------------------- #
 def eastmoney_quote(market, code, raw=False):
     secid = eastmoney_secid(market, code)
-    fields = "f43,f44,f45,f46,f47,f48,f57,f58,f59,f60,f86,f168,f169,f170,f171"
+    fields = ("f43,f44,f45,f46,f47,f48,f57,f58,f59,f60,f86,f116,f164,"
+              "f168,f169,f170,f171")
     url = ("https://push2.eastmoney.com/api/qt/stock/get?secid="
            + urllib.parse.quote(secid, safe=".") + "&fields=" + fields)
     txt = fetch_resilient(url, headers={"Referer": "https://quote.eastmoney.com"})
@@ -963,6 +975,11 @@ def eastmoney_quote(market, code, raw=False):
         "marketState": None,
         "session": {"regular": {"price": price}},
         "timestamp": iso_from_epoch(data.get("f86")),
+        "marketCap": num(data.get("f116")),
+        # Eastmoney integer fundamental fields are scaled by 100. f164 is
+        # trailing-twelve-month PE, matching Yahoo's trailingPE semantics.
+        "pe": (round2(num(data.get("f164")) / 100.0)
+               if num(data.get("f164")) is not None else None),
         "source": "eastmoney",
     }
     if raw:
@@ -1224,9 +1241,11 @@ def race_market(market, code, raw=False):
         ]
         return race(tasks, overall_timeout=QUOTE_TIMEOUT, prefer_grace=0.0)
     tasks = [
-        (2, "tencent", lambda: tencent_quote(market, code, raw=raw)),
-        (2, "sina", lambda: sina_quote(market, code, raw=raw)),
-        (1, "eastmoney", lambda: eastmoney_quote(market, code, raw=raw)),
+        # Prefer sources that include valuation data. Sina remains a fallback
+        # when both richer feeds fail; its quote payload has neither field.
+        (3, "tencent", lambda: tencent_quote(market, code, raw=raw)),
+        (1, "sina", lambda: sina_quote(market, code, raw=raw)),
+        (2, "eastmoney", lambda: eastmoney_quote(market, code, raw=raw)),
     ]
     return race(tasks, overall_timeout=QUOTE_TIMEOUT, prefer_grace=0.0)
 
@@ -1345,7 +1364,7 @@ def _fmt_size(v):
     if v is None:
         return "-"
     v = float(v)
-    for unit, div in (("B", 1e9), ("M", 1e6), ("K", 1e3)):
+    for unit, div in (("T", 1e12), ("B", 1e9), ("M", 1e6), ("K", 1e3)):
         if abs(v) >= div:
             return ("%.2f" % (v / div)).rstrip("0").rstrip(".") + unit
     return str(int(v))
@@ -1453,6 +1472,8 @@ def compact_quote(r):
         "timestamp": timestamp,
         "volume": volume,
         "amount": amount,
+        "marketCap": r.get("marketCap"),
+        "pe": r.get("pe"),
     }
     if "raw" in r:
         out["raw"] = r["raw"]
@@ -1484,6 +1505,10 @@ def build_markdown(r):
         lines += ["", "> " + " · ".join(sub)]
 
     facts = []
+    if r.get("marketCap") is not None:
+        facts.append("**市值** %s %s" % (_fmt_size(r["marketCap"]), cur))
+    if r.get("pe") is not None:
+        facts.append("**市盈率（PE）** %.2f" % r["pe"])
     if r.get("volume") is not None:
         facts.append("**成交量** %s" % _fmt_size(r["volume"]))
     if r.get("amount") is not None:

@@ -17,10 +17,11 @@ def one(q):
         return
     ms = int((time.time() - t0) * 1000)
     name = (d.get("name") or "")[:18]
-    print("  %-12s -> %-3s:%-8s %-18s price=%-9s %s change=%s (%s%%) state=%-8s %dms" % (
+    print("  %-12s -> %-3s:%-8s %-18s price=%-9s %s change=%s (%s%%) marketCap=%s PE=%s state=%-8s %dms" % (
         q, d.get("market", "?"), str(d.get("symbol", "?")), name,
         d.get("price"), d.get("currency", ""), d.get("change"),
-        d.get("changePercent"), d.get("marketState"), ms))
+        d.get("changePercent"), d.get("marketCap"), d.get("pe"),
+        d.get("marketState"), ms))
 
 
 for q in sys.argv[1:]:

@@ -143,7 +143,9 @@ client ──HTTPS──> 反代 (Caddy/nginx) ──HTTP──> 127.0.0.1:8849 
   "timestamp": "2026-07-14 20:25:10",
   "volume": 128340,
   "amount": null,
-  "markdown": "### Apple Inc. `AAPL` · US · 盘前\n\n# <font color=\"info\">213.46 USD</font>\n\n<font color=\"info\">▲ +2.28 (+1.08%)</font>\n\n> 上个收盘价 211.18 · 价格时间 2026-07-14 20:25:10（北京时间）\n\n**成交量** 128.34K"
+  "marketCap": 3150000000000,
+  "pe": 33.42,
+  "markdown": "### Apple Inc. `AAPL` · US · 盘前\n\n# <font color=\"info\">213.46 USD</font>\n\n<font color=\"info\">▲ +2.28 (+1.08%)</font>\n\n> 上个收盘价 211.18 · 价格时间 2026-07-14 20:25:10（北京时间）\n\n**市值** 3.15T USD\n**市盈率（PE）** 33.42\n**成交量** 128.34K"
 }
 ```
 
@@ -153,6 +155,9 @@ client ──HTTPS──> 反代 (Caddy/nginx) ──HTTP──> 127.0.0.1:8849 
 最近一次常规盘收盘价：盘前/盘中对应上个交易日收盘价，盘后/夜盘对应当天常规盘收盘价；
 `change` 和 `changePercent` 均以它为基准。扩展时段上游没有成交量/额时返回 `null`，
 不会用盘中累计值代替。
+
+`marketCap` 为公司总市值，币种与 `currency` 一致；`pe` 为市盈率（Yahoo/东财
+优先使用滚动市盈率 TTM）。上游不提供该指标时字段返回 `null`。
 
 `markdown` 仅使用企业微信支持的标题、加粗、行内代码、引用及字体颜色语法；
 当前价格与涨跌信息使用相同方向色：上涨为 `info`（绿色 ▲），下跌为 `warning`

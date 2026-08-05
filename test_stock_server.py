@@ -1,6 +1,8 @@
 import unittest
+import unittest.mock
 
-from stock_server import build_markdown, compact_quote
+from stock_server import (build_markdown, compact_quote, eastmoney_quote,
+                          normalize_yahoo_quote, tencent_quote)
 
 
 class CompactQuoteTests(unittest.TestCase):
@@ -17,6 +19,8 @@ class CompactQuoteTests(unittest.TestCase):
             "timestamp": "2026-07-14 04:00:00",
             "volume": 900,
             "amount": 9000,
+            "marketCap": 3000000000000,
+            "pe": 30.25,
             "session": {
                 "regular": {
                     "price": 100.0,
@@ -51,7 +55,7 @@ class CompactQuoteTests(unittest.TestCase):
         self.assertEqual(set(result), {
             "ok", "symbol", "name", "market", "currency", "marketState",
             "price", "previousClose", "change", "changePercent", "timestamp",
-            "volume", "amount",
+            "volume", "amount", "marketCap", "pe",
         })
         self.assertNotIn("session", result)
         self.assertNotIn("open", result)
@@ -101,8 +105,43 @@ class CompactQuoteTests(unittest.TestCase):
         self.assertNotIn("🔴", rising)
         self.assertNotIn("🟢", falling)
         self.assertIn("上个收盘价", rising)
+        self.assertIn("**市值** 3T USD", rising)
+        self.assertIn("**市盈率（PE）** 30.25", rising)
         self.assertNotIn("| 时段 |", rising)
         self.assertNotIn("盘后", rising)
+
+
+class ValuationSourceTests(unittest.TestCase):
+    def test_yahoo_uses_market_cap_and_trailing_pe(self):
+        result = normalize_yahoo_quote("us", "AAPL", {
+            "symbol": "AAPL", "regularMarketPrice": 100,
+            "regularMarketPreviousClose": 99, "marketState": "REGULAR",
+            "marketCap": 3000000000000, "trailingPE": 30.25,
+        })
+
+        self.assertEqual(result["marketCap"], 3000000000000)
+        self.assertEqual(result["pe"], 30.25)
+
+    def test_tencent_scales_market_cap_from_hundred_millions(self):
+        fields = [""] * 46
+        fields[1], fields[2], fields[3], fields[4], fields[5] = (
+            "测试公司", "00700", "500", "490", "495")
+        fields[30], fields[39], fields[45] = "20260805120000", "18.5", "45000"
+        payload = 'v_hk00700="%s";' % "~".join(fields)
+        with unittest.mock.patch("stock_server.fetch_resilient", return_value=payload):
+            result = tencent_quote("hk", "00700")
+
+        self.assertEqual(result["marketCap"], 4500000000000)
+        self.assertEqual(result["pe"], 18.5)
+
+    def test_eastmoney_uses_total_market_cap_and_ttm_pe(self):
+        payload = ('{"data":{"f43":1000,"f57":"600000","f58":"测试公司",'
+                   '"f59":2,"f60":900,"f116":123456789,"f164":1875}}')
+        with unittest.mock.patch("stock_server.fetch_resilient", return_value=payload):
+            result = eastmoney_quote("cn", "600000")
+
+        self.assertEqual(result["marketCap"], 123456789)
+        self.assertEqual(result["pe"], 18.75)
 
 
 if __name__ == "__main__":
