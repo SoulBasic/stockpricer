@@ -1370,6 +1370,19 @@ def _fmt_size(v):
     return str(int(v))
 
 
+def _fmt_market_cap(v, currency=""):
+    """Format market cap with Chinese 亿/万亿 units."""
+    if v is None:
+        return "-"
+    value = float(v)
+    if abs(value) >= 1e12:
+        scaled, unit = value / 1e12, "万亿"
+    else:
+        scaled, unit = value / 1e8, "亿"
+    number = ("%.2f" % scaled).rstrip("0").rstrip(".")
+    return "%s%s%s" % (number, unit, currency or "")
+
+
 BJ_TZ = timezone(timedelta(hours=8))
 
 
@@ -1506,7 +1519,7 @@ def build_markdown(r):
 
     facts = []
     if r.get("marketCap") is not None:
-        facts.append("**市值** %s %s" % (_fmt_size(r["marketCap"]), cur))
+        facts.append("**市值** %s" % _fmt_market_cap(r["marketCap"], cur))
     if r.get("pe") is not None:
         facts.append("**市盈率（PE）** %.2f" % r["pe"])
     if r.get("volume") is not None:

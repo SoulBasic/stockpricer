@@ -2,7 +2,7 @@ import unittest
 import unittest.mock
 
 from stock_server import (build_markdown, compact_quote, eastmoney_quote,
-                          normalize_yahoo_quote, tencent_quote)
+                          _fmt_market_cap, normalize_yahoo_quote, tencent_quote)
 
 
 class CompactQuoteTests(unittest.TestCase):
@@ -105,10 +105,14 @@ class CompactQuoteTests(unittest.TestCase):
         self.assertNotIn("🔴", rising)
         self.assertNotIn("🟢", falling)
         self.assertIn("上个收盘价", rising)
-        self.assertIn("**市值** 3T USD", rising)
+        self.assertIn("**市值** 3万亿USD", rising)
         self.assertIn("**市盈率（PE）** 30.25", rising)
         self.assertNotIn("| 时段 |", rising)
         self.assertNotIn("盘后", rising)
+
+    def test_market_cap_uses_chinese_units(self):
+        self.assertEqual(_fmt_market_cap(13840000000, "USD"), "138.4亿USD")
+        self.assertEqual(_fmt_market_cap(1380000000000, "USD"), "1.38万亿USD")
 
 
 class ValuationSourceTests(unittest.TestCase):
