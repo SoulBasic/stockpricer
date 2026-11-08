@@ -47,7 +47,6 @@ import io
 import re
 import sys
 import time
-import hmac
 import threading
 import argparse
 import http.cookiejar
@@ -74,11 +73,6 @@ MAX_RESPONSE_BYTES = int(os.environ.get("MAX_RESPONSE_BYTES", "5000000")) # cap 
 SOCKET_TIMEOUT     = float(os.environ.get("SOCKET_TIMEOUT", "20"))        # client socket read timeout (anti-slowloris), seconds
 RATE_LIMIT_RPM     = float(os.environ.get("RATE_LIMIT_RPM", "120"))       # per-client req/min for /quote & /search (0 disables)
 TRUST_PROXY        = os.environ.get("TRUST_PROXY", "0").lower() in ("1", "true", "yes")  # honor X-Real-IP / X-Forwarded-For
-# Bearer-token auth: when AUTH_TOKEN is set, every request (except /health, kept
-# open for liveness probes) must carry `Authorization: Bearer <token>`.  Accepts
-# a comma-separated list so tokens can be rotated.  Empty -> auth disabled.
-AUTH_TOKENS = tuple(t for t in (s.strip() for s in
-                                os.environ.get("AUTH_TOKEN", "").split(",")) if t)
 
 
 # --------------------------------------------------------------------------- #
@@ -1616,21 +1610,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _authorized(self):
-        """True when no token is configured, or the request carries a valid
-        `Authorization: Bearer <token>` header.  Constant-time compared against
-        every configured token so a bad token can't be guessed by timing."""
-        if not AUTH_TOKENS:
-            return True
-        parts = self.headers.get("Authorization", "").split(None, 1)
-        if len(parts) != 2 or parts[0].lower() != "bearer":
-            return False
-        got = parts[1].strip()
-        ok = False
-        for t in AUTH_TOKENS:                  # no early-exit -> no timing leak
-            ok |= hmac.compare_digest(got, t)
-        return ok
-
     def _client_ip(self):
         # Only trust forwarding headers when explicitly told we sit behind a
         # known reverse proxy; otherwise they are attacker-controlled.
@@ -1656,13 +1635,6 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
-
-        # Bearer-token gate (when AUTH_TOKEN is configured).  Checked before any
-        # work so unauthorized callers never trigger an outbound fetch.  /health
-        # and /favicon.ico stay open so liveness probes / browsers don't 401.
-        if path not in ("/health", "/favicon.ico") and not self._authorized():
-            return self._send(401, {"ok": False, "error": "unauthorized"},
-                              extra_headers={"WWW-Authenticate": 'Bearer realm="stockpricer"'})
 
         if path in ("/", "/help"):
             return self._send(200, USAGE)
