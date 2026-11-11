@@ -2,7 +2,8 @@ import unittest
 import unittest.mock
 
 from stock_server import (build_markdown, compact_quote, eastmoney_quote,
-                          _fmt_market_cap, normalize_yahoo_quote, tencent_quote)
+                          _fmt_market_cap, fill_yahoo_extended_from_robinhood,
+                          normalize_yahoo_quote, tencent_quote)
 
 
 class CompactQuoteTests(unittest.TestCase):
@@ -88,6 +89,21 @@ class CompactQuoteTests(unittest.TestCase):
         self.assertIsNone(result["volume"])
         self.assertIsNone(result["amount"])
 
+    def test_pre_market_without_pre_print_quotes_regular_day_move(self):
+        # Yahoo says PRE but has no pre-market trade: the headline is still the
+        # regular close, so its move is vs the previous day, not 0 vs itself.
+        quote = self.quote("PRE", 100.0)
+        quote["session"]["pre"] = None
+        quote["session"]["post"] = None
+
+        result = compact_quote(quote)
+
+        self.assertEqual(result["marketState"], "PRE")
+        self.assertEqual(result["previousClose"], 95.0)
+        self.assertEqual(result["change"], 5.0)
+        self.assertAlmostEqual(result["changePercent"], 5.2632)
+        self.assertEqual(result["timestamp"], "2026-07-14 04:00:00")
+
     def test_markdown_uses_only_supported_red_green_color_tags(self):
         rising = build_markdown(compact_quote(self.quote("PRE", 101.0)))
         falling_quote = self.quote("POST", 98.0)
@@ -113,6 +129,51 @@ class CompactQuoteTests(unittest.TestCase):
     def test_market_cap_uses_chinese_units(self):
         self.assertEqual(_fmt_market_cap(13840000000, "USD"), "138.4亿USD")
         self.assertEqual(_fmt_market_cap(1380000000000, "USD"), "1.38万亿USD")
+
+
+class RobinhoodExtendedFillTests(unittest.TestCase):
+    # 2026-11-10 16:00 EST regular close; Yahoo PRE with no preMarketPrice
+    # (what it returned for Nasdaq symbols on 2026-11-11).
+    YAHOO = {"symbol": "AAPL", "marketState": "PRE",
+             "regularMarketPrice": 348.51, "regularMarketPreviousClose": 350.69,
+             "regularMarketTime": 1794344400}
+
+    def rh(self, price, when):
+        return {"last_extended_hours_trade_price": "%.6f" % price,
+                "venue_last_non_reg_trade_time": when}
+
+    def test_missing_pre_market_is_filled_from_robinhood(self):
+        yq = fill_yahoo_extended_from_robinhood(
+            self.YAHOO, self.rh(346.5, "2026-11-11T10:05:41.702847013Z"))
+        result = compact_quote(normalize_yahoo_quote("us", "AAPL", yq))
+
+        self.assertEqual(result["marketState"], "PRE")
+        self.assertEqual(result["price"], 346.5)
+        self.assertEqual(result["previousClose"], 348.51)
+        self.assertEqual(result["change"], -2.01)
+        self.assertAlmostEqual(result["changePercent"], -0.5767)
+        self.assertNotIn("preMarketPrice", self.YAHOO)
+
+    def test_newer_yahoo_pre_market_is_kept(self):
+        yahoo = dict(self.YAHOO, preMarketPrice=347.0,
+                     preMarketTime=1794391600)       # 10:06:40Z
+        yq = fill_yahoo_extended_from_robinhood(
+            yahoo, self.rh(346.5, "2026-11-11T10:05:41Z"))
+
+        self.assertIs(yq, yahoo)
+
+    def test_after_hours_print_fills_post_market_only(self):
+        yq = fill_yahoo_extended_from_robinhood(
+            self.YAHOO, self.rh(349.0, "2026-11-11T00:59:58Z"))  # 19:59:58 EST
+
+        self.assertEqual(yq["postMarketPrice"], 349.0)
+        self.assertNotIn("preMarketPrice", yq)
+
+    def test_print_before_regular_close_is_ignored(self):
+        yq = fill_yahoo_extended_from_robinhood(
+            self.YAHOO, self.rh(350.0, "2026-11-10T14:00:00Z"))  # 09:00 EST
+
+        self.assertIs(yq, self.YAHOO)
 
 
 class ValuationSourceTests(unittest.TestCase):

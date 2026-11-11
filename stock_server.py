@@ -677,17 +677,72 @@ def normalize_robinhood(code, r, raw=False, ov=_UNSET):
     return out
 
 
+def _us_extended_session_of(epoch):
+    """'pre' / 'post' for a trade printed at `epoch` during the US pre-market
+    (04:00-09:30 ET) or after-hours (16:00-20:00 ET) window, else None."""
+    dt = datetime.fromtimestamp(epoch, tz=timezone.utc)
+    et = dt + timedelta(hours=_us_eastern_offset(dt))
+    mins = et.hour * 60 + et.minute
+    if 4 * 60 <= mins < 9 * 60 + 30:
+        return "pre"
+    if 16 * 60 <= mins < 20 * 60:
+        return "post"
+    return None
+
+
+def fill_yahoo_extended_from_robinhood(yq, rq):
+    """Fill Yahoo's pre/post-market fields from Robinhood's last extended-hours
+    trade when Yahoo lacks that session or Robinhood's print is newer.
+
+    Yahoo's v7 quote can say marketState=PRE while carrying no preMarketPrice
+    at all: on 2026-11-11 every Nasdaq-listed symbol (AAPL, TSLA, NVDA, QQQ ...)
+    came back that way while NYSE / Arca symbols still had it, and the headline
+    silently fell back to the regular close.  Robinhood's /quotes/ keeps the
+    live extended-hours print (`last_extended_hours_trade_price`); its trade
+    time tells pre-market from after-hours.  Only prints newer than Yahoo's
+    regular close are used, so a session that has not started yet stays empty.
+    Returns `yq` itself when nothing changes, otherwise a filled copy."""
+    if not rq:
+        return yq
+    p = num(rq.get("last_extended_hours_trade_price"))
+    t = _parse_iso_epoch(rq.get("venue_last_non_reg_trade_time"))
+    if p is None or t is None:
+        return yq
+    kind = _us_extended_session_of(t)
+    reg_ts = num(yq.get("regularMarketTime"))
+    if kind is None or (reg_ts is not None and t <= reg_ts):
+        return yq
+    prefix = "preMarket" if kind == "pre" else "postMarket"
+    y_ts = num(yq.get(prefix + "Time"))
+    if yq.get(prefix + "Price") is not None and y_ts is not None and y_ts >= t:
+        return yq
+    reg = num(yq.get("regularMarketPrice"))
+    out = dict(yq)
+    out.update({
+        prefix + "Price": p,
+        prefix + "Time": int(t),
+        prefix + "Change": (p - reg) if reg else None,
+        prefix + "ChangePercent": pct(p, reg),
+        # Yahoo's volume/turnover belong to its own (older) print
+        prefix + "Volume": None,
+        prefix + "Turnover": None,
+    })
+    return out
+
+
 def us_yahoo_plus_robinhood(market, code, raw=False):
-    """Primary US path: Yahoo (state + OHLC + pre/post) enriched with the live
-    Robinhood overnight(夜盘) print.  Both upstreams are fetched concurrently so
-    the combined call costs ~max(yahoo, robinhood), not their sum.
+    """Primary US path: Yahoo (state + OHLC + pre/post) enriched with
+    Robinhood's extended-hours print (fills pre/post when Yahoo lacks them) and
+    live overnight(夜盘) print.  All upstreams are fetched concurrently so the
+    combined call costs ~max(yahoo, robinhood), not their sum.
 
     US is limited to Yahoo + Robinhood (the Chinese aggregators lag on
     pre/post/overnight), so if Yahoo is unavailable we fall back to a
     Robinhood-only quote -- which still carries regular + after-hours + live
     overnight -- rather than dropping to a laggy source."""
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:
         f_yahoo = ex.submit(YAHOO.quote, market, code)
+        f_rh = ex.submit(robinhood_quote, code)
         f_ov = ex.submit(robinhood_overnight, code)
         try:
             yq = f_yahoo.result()
@@ -696,11 +751,24 @@ def us_yahoo_plus_robinhood(market, code, raw=False):
                 ov = f_ov.result()
             except Exception:
                 ov = None
-            base = normalize_robinhood(code, robinhood_quote(code), raw=raw, ov=ov)
+            base = normalize_robinhood(code, f_rh.result(), raw=raw, ov=ov)
             base.setdefault("notes", []).append(
                 "yahoo unavailable; robinhood-only fallback (%s)" % e)
             return base
-        base = normalize_yahoo_quote(market, code, yq, raw=raw)
+        try:
+            yq_filled = fill_yahoo_extended_from_robinhood(yq, f_rh.result())
+        except Exception as e:  # robinhood extended-hours fill optional
+            yq_filled = yq
+            notes = ["robinhood quote failed: %s" % e]
+        else:
+            notes = []
+        base = normalize_yahoo_quote(market, code, yq_filled, raw=raw)
+        if raw:
+            base["raw"] = yq                # upstream payload as received
+        if yq_filled is not yq:
+            notes.append("extended-hours print filled from robinhood")
+        if notes:
+            base.setdefault("notes", []).extend(notes)
         try:
             ov = f_ov.result()
         except Exception as e:  # robinhood overnight optional
@@ -1438,6 +1506,11 @@ def compact_quote(r):
     sessions = r.get("session") or {}
     state = r.get("marketState")
     active_key = _STATE_KEY.get(state or "")
+    # A labelled session with no print yet (e.g. PRE before any pre-market
+    # trade) leaves the headline on an older price: don't quote that price
+    # against the regular close it usually *is* (always 0 change).
+    if active_key and (sessions.get(active_key) or {}).get("price") is None:
+        active_key = None
 
     # CLOSED can still carry the latest post/overnight print.  Identify which
     # session owns the headline without exposing every historical session.
