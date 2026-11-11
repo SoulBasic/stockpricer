@@ -1,9 +1,9 @@
 services:
   stockpricer:
-    # Build locally, or pull the published image:
-    #   image: ghcr.io/soulbasic/stockpricer:latest
+    # Build locally, or pull the published image (deploy/portainer.sh drops
+    # `build` and sets STOCKPRICER_IMAGE to the image it built on the host).
     build: .
-    image: ghcr.io/soulbasic/stockpricer:latest
+    image: "${STOCKPRICER_IMAGE:-ghcr.io/soulbasic/stockpricer:latest}"
     container_name: stockpricer
     restart: unless-stopped
 

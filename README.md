@@ -90,6 +90,21 @@ curl 'http://127.0.0.1:8849/quote?q=腾讯'
 
 镜像标签：`latest`（默认分支）、`master`、`sha-<short>`，以及打 `vX.Y.Z` tag 时的 `X.Y.Z` / `X.Y`。
 
+### 本地直接部署到 Portainer（不经过镜像仓库）
+
+```bash
+deploy/portainer.sh               # 单元测试 → 在 Docker 主机上构建镜像 → 更新 stack
+deploy/portainer.sh --skip-tests
+```
+
+脚本只把 `Dockerfile` + 源码打包发给 Portainer，在 Docker 主机上构建
+`stockpricer:<git sha>`，然后创建/更新 Portainer stack `stockpricer`
+（`docker-compose.yml` 去掉 `build`，`STOCKPRICER_IMAGE` 指向新镜像），等 `/health`
+通过后清理旧镜像（保留当前和上一个，便于回滚）。同名的 Git 型 stack（旧的 GHCR 部署方式）
+会被替换一次。配置放在 gitignore 的 `.env.deploy`：`PORTAINER_URL`、`PORTAINER_TOKEN`、
+`PORTAINER_ENDPOINT`（默认 `local`）、`STACK_ENV`（传给 compose 的变量，默认
+`BIND_ADDR=0.0.0.0 TRUST_PROXY=1`）。
+
 ## 公网部署与安全
 
 服务本身是明文 HTTP，**不要把 8849 直接暴露公网**，应放在 TLS 反向代理后面：
